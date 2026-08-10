@@ -1,0 +1,39 @@
+{
+  "price_classes": [
+    "price-desc--hxYyq3i3",
+    "price-wrap--YzmU5cUl",
+    "row3-wrap-price--IZmX7M0K",
+    "search-price-confirm-button--I2ThavjG",
+    "search-price-input--p1NQEAuz",
+    "search-price-input-container--Pj1QTO7h",
+    "search-price-input-divider--qhCD6NAU"
+  ],
+  "title_classes": [
+    "footer-item-imgs-imgtext-maintitle--l42mELut",
+    "footer-item-imgs-imgtext-title--B3vnVHf_",
+    "main-title--sMrtWSJa",
+    "price-desc--hxYyq3i3",
+    "row1-wrap-title--qIlOySTh",
+    "search-select-title--zzthyzLG",
+    "search-select-title-container--PqkTXn91"
+  ],
+  "item_href_sample": [
+    "https://www.goofish.com/item?id=1071219311637&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1071219651711&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1022114467021&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1072085074323&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1074072464373&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1071679290454&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1074097536905&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1072056066635&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1073101389630&amp;categoryId=126856282",
+    "https://www.goofish.com/item?id=1074075404491&amp;categoryId=126856282"
+  ],
+  "price_desc_text": "",
+  "price_wrap_text": "",
+  "title_samples": [
+    "推动绿色发展，促进闲置流通",
+    "《促进绿色消费实施方案》",
+    "《关于加快废旧物资循环利用体系建设的指导意见》"
+  ]
+}

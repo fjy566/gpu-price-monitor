@@ -1,0 +1,6 @@
+.sessions/
+prices.db
+__pycache__/
+ui_preview.png
+
+.chrome_profile/

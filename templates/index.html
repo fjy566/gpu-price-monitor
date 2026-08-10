@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>GPU 行情工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="ambient-grid" aria-hidden="true"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span></div>
+        <div>
+          <div class="eyebrow">GPU MARKET TELEMETRY</div>
+          <h1>显卡价格监控中心</h1>
+          <p>RTX 30 / 40 / 50 系 · 闲鱼行情与浏览器采集控制</p>
+        </div>
+      </div>
+      <div class="live-badge" id="liveBadge" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="label">待命</span>
+      </div>
+    </header>
+
+    <nav class="quick-nav" aria-label="工作台导航">
+      <a href="#overview">总览</a>
+      <a href="#collection">采集</a>
+      <a href="#insights">行情</a>
+      <a href="#inventory">价格库</a>
+      <a href="#connections">连接设置</a>
+    </nav>
+
+    <main class="dashboard">
+      <section class="stat-grid" aria-label="核心指标">
+        <article class="stat-card">
+          <span class="stat-index">01</span>
+          <div class="stat-num" id="statModels">–</div>
+          <div class="stat-label">覆盖型号</div>
+        </article>
+        <article class="stat-card">
+          <span class="stat-index">02</span>
+          <div class="stat-num" id="statItems">–</div>
+          <div class="stat-label">当前商品</div>
+        </article>
+        <article class="stat-card">
+          <span class="stat-index">03</span>
+          <div class="stat-num" id="statRounds">–</div>
+          <div class="stat-label">完成轮次</div>
+        </article>
+        <article class="stat-card accent">
+          <span class="stat-index">04</span>
+          <div class="stat-num" id="statCheapest">–</div>
+          <div class="stat-label">今日优选</div>
+        </article>
+      </section>
+
+      <div class="workspace-grid" id="overview">
+        <section class="panel span-5">
+          <div class="panel-head">
+            <div><span class="panel-kicker">WATCHLIST</span><h2>关注型号行情</h2></div>
+          </div>
+          <div id="watch-snapshot" class="watch-snapshot" aria-live="polite">
+            <div class="placeholder">暂无关注型号数据</div>
+          </div>
+        </section>
+
+        <section class="panel span-7 control-panel" id="collection">
+          <div class="panel-head">
+            <div><span class="panel-kicker">COLLECTOR</span><h2>采集控制台</h2></div>
+            <span id="stateBadge" class="badge stopped" role="status" aria-live="polite">已停止</span>
+          </div>
+          <div class="controls-row primary-controls">
+            <button type="button" id="btn-start" class="btn primary big">开始采集</button>
+            <button type="button" id="btn-pause" class="btn warning" disabled>暂停</button>
+            <button type="button" id="btn-resume" class="btn secondary" disabled>继续</button>
+            <button type="button" id="btn-stop" class="btn danger" disabled>停止</button>
+          </div>
+          <div class="progress-track" id="progressTrack" role="progressbar" aria-label="本轮采集进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="control-meta">
+            <div class="mode-lock" aria-label="唯一采集方式：模拟浏览器">
+              <span class="mode-lock-icon">◎</span>
+              <div><span class="mode-lock-kicker">COLLECT MODE</span><strong>模拟浏览器</strong><small>Playwright · 专用 Chrome · 闲鱼</small></div>
+              <span class="tag">已固定</span>
+            </div>
+            <p class="hint">点击开始后自动启动专用浏览器；每个选中型号完整采集一轮，商品逐条刷新，完成后自动退出浏览器。</p>
+          </div>
+          <p class="hint" id="boot-hint">首次使用可提前启动浏览器扫码登录；之后直接点击开始采集即可自动启停浏览器。</p>
+          <p class="feedback error" id="error-hint" role="alert" aria-live="assertive"></p>
+        </section>
+      </div>
+
+      <div class="section-heading" id="connections">
+        <span>SETUP / 连接与采集范围</span><h2>配置采集工作流</h2>
+      </div>
+      <div class="workspace-grid">
+        <section class="panel span-12">
+          <div class="panel-head">
+            <div><span class="panel-kicker">SCOPE</span><h2>采集范围与关注型号</h2></div>
+            <button type="button" id="btn-save-scope" class="btn primary">保存范围</button>
+          </div>
+          <p class="hint no-margin">采集平台已固定为闲鱼；星标用于关注。自定义型号可删除，内置型号可隐藏并在下方恢复。</p>
+          <div class="scope-section">
+            <h3>平台</h3>
+            <div class="platform-lockup" id="scope-platforms" aria-label="当前采集平台：闲鱼">
+              <span class="platform-lock-icon">XY</span>
+              <span><strong>闲鱼</strong><small>唯一采集平台 · 浏览器登录态</small></span>
+              <span class="tag">已固定</span>
+            </div>
+          </div>
+          <div class="scope-section">
+            <div class="scope-title-row"><h3>型号</h3><span class="hint no-margin">选择采集 · 星标关注 · 可添加 AMD/自定义型号</span></div>
+            <div class="add-model">
+              <label class="sr-only" for="new-model">新型号名称</label>
+              <input type="text" id="new-model" maxlength="40" placeholder="例如 RX 7900 XTX" class="add-model-input">
+              <button type="button" id="btn-add-model" class="btn secondary">添加型号</button>
+            </div>
+            <div class="card-grid model-grid" id="scope-models"></div>
+            <div class="hidden-models-panel" id="hidden-models-panel" hidden>
+              <div class="hidden-models-head"><span>已隐藏内置型号</span><small>仅隐藏，不会删除；可随时恢复</small></div>
+              <div class="hidden-model-list" id="hidden-models"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel span-6">
+          <div class="panel-head"><div><span class="panel-kicker">FILTERS</span><h2>噪声过滤阈值</h2></div></div>
+          <div class="settings-grid">
+            <label class="field" for="cfg-abs_min"><span>绝对下限 <small>元</small></span><input type="number" id="cfg-abs_min" value="500" min="0" max="1000000"></label>
+            <label class="field" for="cfg-low_ratio"><span>低价比例 <small>0–1</small></span><input type="number" id="cfg-low_ratio" step="0.05" value="0.55" min="0.01" max="1"></label>
+            <label class="field" for="cfg-high_ratio"><span>高价倍数 <small>1–20</small></span><input type="number" id="cfg-high_ratio" step="0.5" value="3" min="1" max="20"></label>
+            <label class="check-field" for="cfg-keep_min"><input type="checkbox" id="cfg-keep_min" checked><span>保留合法最低价</span></label>
+          </div>
+          <div class="btn-row">
+            <button type="button" id="btn-save-settings" class="btn primary">保存阈值</button>
+            <button type="button" id="btn-reset-settings" class="btn ghost">恢复默认</button>
+          </div>
+          <p class="hint">阈值在下一次采集生效；引流标价、非整卡、明显赝品/故障品及价格离群项会在入库前过滤。</p>
+        </section>
+
+        <section class="panel span-6">
+          <div class="panel-head">
+            <div><span class="panel-kicker">BROWSER</span><h2>平台登录</h2></div>
+            <span class="tag" id="browserState">浏览器未启动</span>
+          </div>
+          <p class="hint no-margin">使用独立的持久化 Chrome profile，不读取日常浏览器会话。扫码登录一次后会保留在本项目目录。</p>
+          <div class="btn-row">
+            <button type="button" id="btn-boot" class="btn primary">提前登录</button>
+            <button type="button" id="btn-check" class="btn secondary">校验登录</button>
+            <button type="button" id="btn-mode" class="btn ghost">切换模式</button>
+          </div>
+          <p class="hint">当前模式：<strong id="browser-mode-label">最小化</strong></p>
+          <div class="login-grid" id="loginGrid"></div>
+        </section>
+
+      </div>
+
+      <div class="section-heading" id="insights">
+        <span>INSIGHTS / 行情分析</span><h2>从价格数据中找到可信机会</h2>
+      </div>
+      <div class="workspace-grid">
+        <section class="panel span-5">
+          <div class="panel-head"><div><span class="panel-kicker">DEALS</span><h2>今日最佳推荐</h2></div></div>
+          <div id="cheapest-box" class="cheapest-box" aria-live="polite">正在读取…</div>
+        </section>
+        <section class="panel span-7">
+          <div class="panel-head"><div><span class="panel-kicker">DISTRIBUTION</span><h2>数据统计</h2></div></div>
+          <div id="stats-grid" class="stats-grid">
+            <div class="mini-stat"><div class="m-num" id="st-count">–</div><div class="m-label">真实商品</div></div>
+            <div class="mini-stat"><div class="m-num" id="st-mean">–</div><div class="m-label">均价</div></div>
+            <div class="mini-stat"><div class="m-num" id="st-median">–</div><div class="m-label">中位数</div></div>
+            <div class="mini-stat"><div class="m-num" id="st-models">–</div><div class="m-label">型号覆盖</div></div>
+          </div>
+          <div id="stats-chart" class="chart"></div>
+          <div id="stats-detail" class="stats-detail"></div>
+        </section>
+        <section class="panel span-6">
+          <div class="panel-head"><div><span class="panel-kicker">MODEL MAP</span><h2>各型号价格概览</h2></div></div>
+          <p class="hint no-margin">散点展示真实商品分布，菱形为最低价、竖线为中位价、圆点为平均价。</p>
+          <div id="series-chart" class="chart"></div>
+        </section>
+        <section class="panel span-6">
+          <div class="panel-head"><div><span class="panel-kicker">HISTORY</span><h2>价格走势</h2></div></div>
+          <div class="trend-form">
+            <label class="field"><span>型号</span><select id="trend-model"></select></label>
+            <label class="field"><span>平台</span><select id="trend-platform" aria-label="走势图平台"><option value="闲鱼">闲鱼</option></select></label>
+            <button type="button" id="btn-trend" class="btn secondary">生成走势</button>
+          </div>
+          <div id="trend-chart" class="chart"><div class="placeholder">单日显示箱型图与散点，多日显示每日中位价及四分位区间</div></div>
+        </section>
+      </div>
+
+      <div class="section-heading" id="inventory">
+        <span>INVENTORY / 实时价格库</span><h2>筛选、比较与导出当前商品</h2>
+      </div>
+      <div class="workspace-grid">
+        <section class="panel span-12">
+          <div class="panel-head"><div><span class="panel-kicker">PRICE FEED</span><h2>全部价格 <span id="price-count" class="tag"></span></h2></div></div>
+          <div class="filters" aria-label="价格筛选">
+            <label class="field grow"><span>搜索</span><input type="search" id="filter-search" placeholder="型号或商品标题"></label>
+            <label class="field"><span>系列</span><select id="filter-series"><option value="">全部系列</option><option>RTX 50 系</option><option>RTX 40 系</option><option>RTX 30 系</option><option>RX 9000 系</option><option>RX 7000 系</option><option>其他</option></select></label>
+            <label class="field"><span>排序</span><select id="filter-sort"><option value="price-asc">价格从低到高</option><option value="price-desc">价格从高到低</option><option value="model">型号</option></select></label>
+            <label class="field range"><span>最低价</span><input type="number" id="filter-min" min="0" placeholder="0"></label>
+            <label class="field range"><span>最高价</span><input type="number" id="filter-max" min="0" placeholder="不限"></label>
+            <label class="check-field filter-check" for="filter-watched"><input type="checkbox" id="filter-watched"><span>只看关注</span></label>
+          </div>
+          <div id="price-table-wrap" class="table-wrap" tabindex="0" aria-label="价格数据表"></div>
+          <div class="pagination" id="pagination"></div>
+        </section>
+        <section class="panel span-8">
+          <div class="panel-head"><div><span class="panel-kicker">RUN LOG</span><h2>采集日志</h2></div><button type="button" id="btn-refresh-log" class="btn ghost small">刷新</button></div>
+          <div id="crawl-log" class="crawl-log" aria-live="polite"><div class="placeholder">暂无日志</div></div>
+        </section>
+        <section class="panel span-4 action-panel">
+          <div class="panel-head"><div><span class="panel-kicker">DATA</span><h2>数据操作</h2></div></div>
+          <p class="hint no-margin">导出当前去重商品为 Excel 兼容 CSV；清空会删除当前价格与历史走势，保留配置和登录 profile。</p>
+          <div class="btn-row vertical">
+            <button type="button" id="btn-export" class="btn secondary">导出 CSV</button>
+            <button type="button" id="btn-clear" class="btn danger ghost-danger">清空价格数据</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer><span>LOCAL-FIRST</span> 数据保存在本机 · 请遵守各平台用户协议与访问规则</footer>
+  </div>
+
+  <div id="toast-wrap" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
