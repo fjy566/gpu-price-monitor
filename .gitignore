@@ -1,6 +1,12 @@
 .sessions/
-prices.db
+.chrome_profile/
+
+# Local databases, logs and SQLite sidecar files may contain credentials,
+# cookies, login state or private collection data.
+*.db
+*.db-shm
+*.db-wal
+*.log
+
 __pycache__/
 ui_preview.png
-
-.chrome_profile/
