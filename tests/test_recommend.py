@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import recommend
 
@@ -18,16 +18,22 @@ def row(row_id, price, url):
 
 
 class RecommendationTests(unittest.TestCase):
+    @staticmethod
+    def snapshot(rows):
+        grouped = {}
+        for item in rows:
+            grouped.setdefault(item["model"], []).append(item["price"])
+        return SimpleNamespace(rows=tuple(rows), model_prices={k: tuple(v) for k, v in grouped.items()})
+
     def test_extreme_low_outlier_is_not_recommended(self):
         rows = [row(1, 500, "a"), row(2, 3000, "b"), row(3, 3100, "c"), row(4, 3200, "d")]
-        with patch("recommend.db.all_prices", return_value=rows):
-            recs = recommend._compute_recommendations(limit=5)
+        recs = recommend._compute_recommendations(limit=5, snapshot=self.snapshot(rows))
         self.assertTrue(recs)
         self.assertNotIn(500, [item["price"] for item in recs])
 
     def test_single_sample_does_not_claim_to_be_a_deal(self):
-        with patch("recommend.db.all_prices", return_value=[row(1, 3000, "a")]):
-            recs = recommend._compute_recommendations(limit=5)
+        rows = [row(1, 3000, "a")]
+        recs = recommend._compute_recommendations(limit=5, snapshot=self.snapshot(rows))
         self.assertEqual([], recs)
 
 

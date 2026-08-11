@@ -20,6 +20,7 @@ let selectedPlatforms = new Set();
 let pricePage = 1;
 let pricePageSize = 20;
 let dataSignature = "";
+let dataRevision = -1;
 let fastBusy = false;
 let slowBusy = false;
 let modalPreviousFocus = null;
@@ -698,11 +699,17 @@ function signatureFor(rows) {
 }
 
 async function refreshDataBundle(force = false) {
-  const priceResult = await api("/api/prices");
+  const suffix = !force && dataRevision >= 0 ? `?since=${encodeURIComponent(dataRevision)}` : "";
+  const priceResult = await api(`/api/prices${suffix}`);
+  if (priceResult.unchanged) return;
   const rows = priceResult.data || [];
-  const nextSignature = signatureFor(rows);
-  if (!force && nextSignature === dataSignature) return;
-  dataSignature = nextSignature;
+  if (Number.isFinite(Number(priceResult.revision))) {
+    dataRevision = Number(priceResult.revision);
+  } else {
+    const nextSignature = signatureFor(rows);
+    if (!force && nextSignature === dataSignature) return;
+    dataSignature = nextSignature;
+  }
   allData = rows;
   renderPrices();
   const [stats, recommendations, series, models] = await Promise.all([
@@ -743,6 +750,7 @@ async function doClear() {
   const result = await api("/api/clear", "POST");
   toast(result.msg || "价格数据已清空", "success");
   dataSignature = "__force__";
+  dataRevision = -1;
   await refreshDataBundle(true);
 }
 
@@ -783,7 +791,7 @@ async function fastLoop() {
     catch (error) { console.warn(error.message); }
     finally { fastBusy = false; }
   }
-  // 采集器每写入一条即提交事务；高频轻量状态轮询让管理台及时反映进度。
+  // 采集器按页面批量提交、逐条记录日志；高频轻量状态轮询及时反映进度。
   window.setTimeout(fastLoop, 2000);
 }
 
@@ -794,7 +802,7 @@ async function slowLoop() {
     catch (error) { console.warn(error.message); }
     finally { slowBusy = false; }
   }
-  // 价格列表单独按签名增量刷新，未变化时不会重新拉取统计/图表。
+  // 仅轮询轻量数据版本；版本未变化时服务端不再序列化完整价格列表。
   window.setTimeout(slowLoop, 2500);
 }
 

@@ -8,6 +8,7 @@ from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prices.db")
 _lock = threading.Lock()
+_revision_cache = {}
 
 
 def _conn():
@@ -18,6 +19,9 @@ def _conn():
 
 def init_db():
     with _lock, closing(_conn()) as c:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.execute("PRAGMA temp_store=MEMORY")
         c.execute("""
             CREATE TABLE IF NOT EXISTS prices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +76,8 @@ def init_db():
         except Exception:
             pass
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prices_url ON prices(url) WHERE url != ''")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_prices_platform_model ON prices(platform, model)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_prices_platform_ts ON prices(platform, ts)")
         # 历史表按“商品链接 + 自然日”保留一个快照；先清理旧版本在同一天写入的重复记录。
         c.execute("""
             DELETE FROM price_history
@@ -84,14 +90,15 @@ def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_history_url_day
             ON price_history(url, substr(ts, 1, 10)) WHERE url != ''
         """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_history_model_platform_ts "
+                  "ON price_history(model, platform, ts)")
         c.commit()
+        row = c.execute("SELECT value FROM state WHERE key='catalog_revision'").fetchone()
+        _revision_cache[DB_PATH] = int(row["value"] if row else 0)
 
 
 def set_state(key, value):
-    with _lock, closing(_conn()) as c:
-        c.execute("INSERT INTO state(key,value) VALUES(?,?) "
-                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
-        c.commit()
+    set_states({key: value})
 
 
 def get_state(key, default=None):
@@ -100,52 +107,117 @@ def get_state(key, default=None):
         return r["value"] if r else default
 
 
+def get_states(defaults, prefix=""):
+    """一次连接读取一组状态，避免逐键打开 SQLite 连接。"""
+    defaults = dict(defaults or {})
+    if not defaults:
+        return {}
+    full_keys = [prefix + key for key in defaults]
+    placeholders = ",".join("?" for _ in full_keys)
+    with _lock, closing(_conn()) as c:
+        rows = c.execute(
+            f"SELECT key,value FROM state WHERE key IN ({placeholders})", full_keys
+        ).fetchall()
+    found = {row["key"]: row["value"] for row in rows}
+    return {key: found.get(prefix + key, default) for key, default in defaults.items()}
+
+
+def set_states(values, prefix=""):
+    """在一个事务中写入一组状态。"""
+    rows = [(prefix + key, str(value)) for key, value in dict(values or {}).items()]
+    if not rows:
+        return
+    with _lock, closing(_conn()) as c:
+        c.executemany(
+            "INSERT INTO state(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", rows,
+        )
+        c.commit()
+
+
+def _bump_catalog_revision(c):
+    row = c.execute(
+        "INSERT INTO state(key,value) VALUES('catalog_revision','1') "
+        "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1 RETURNING value"
+    ).fetchone()
+    return int(row["value"] if row else 0)
+
+
+def catalog_revision():
+    cached = _revision_cache.get(DB_PATH)
+    if cached is not None:
+        return cached
+    try:
+        value = int(get_state("catalog_revision", "0") or 0)
+        _revision_cache[DB_PATH] = value
+        return value
+    except (TypeError, ValueError):
+        return 0
+
+
 def add_price(model, series, generation, platform, title, price, url):
     """写入价格。去重策略（UPSERT）：
     - prices 表：按 url 唯一，同一商品重复采集时【更新】价格/标题/时间，不新增行，保证不冗余。
     - price_history 表：同一商品同一天只保留一个最新快照；跨天则新增日快照。
     """
-    # 微秒精度保证同一秒内多次刷新也能正确判断“最新”。旧的秒级时间戳仍可排序/解析。
-    ts = datetime.now().isoformat(sep=" ", timespec="microseconds")
+    add_prices([(model, series, generation, platform, title, price, url)])
+
+
+def add_prices(records):
+    """批量写入商品，在一个连接和事务中完成当前价、日快照与版本更新。"""
+    records = list(records)
+    if not records:
+        return 0
     with _lock, closing(_conn()) as c:
-        old = None
-        if url:
-            row = c.execute("SELECT id, price FROM prices WHERE url=?", (url,)).fetchone()
-            if row:
-                old = {"id": row["id"], "price": row["price"]}
-        if url and old:
-            c.execute("""UPDATE prices SET model=?, series=?, generation=?, platform=?,
-                        title=?, price=?, ts=? WHERE id=?""",
-                      (model, series, generation, platform, title, price, ts, old["id"]))
-        else:
-            c.execute(
-                "INSERT INTO prices(model,series,generation,platform,title,price,url,ts) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (model, series, generation, platform, title, price, url, ts),
-            )
-        day = ts[:10]
-        if url:
-            daily = c.execute(
-                "SELECT id FROM price_history WHERE url=? AND substr(ts,1,10)=? "
-                "ORDER BY ts DESC LIMIT 1", (url, day),
-            ).fetchone()
-        else:
-            daily = c.execute(
-                "SELECT id FROM price_history WHERE model=? AND platform=? AND title=? "
-                "AND substr(ts,1,10)=? ORDER BY ts DESC LIMIT 1",
-                (model, platform, title, day),
-            ).fetchone()
-        if daily:
-            c.execute("""UPDATE price_history SET model=?, series=?, generation=?, platform=?,
-                        title=?, price=?, url=?, ts=? WHERE id=?""",
-                      (model, series, generation, platform, title, price, url, ts, daily["id"]))
-        else:
-            c.execute(
-                "INSERT INTO price_history(model,series,generation,platform,title,price,url,ts) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (model, series, generation, platform, title, price, url, ts),
-            )
+        for record in records:
+            _add_price_with_connection(c, record)
+        revision = _bump_catalog_revision(c)
         c.commit()
+        _revision_cache[DB_PATH] = revision
+    return len(records)
+
+
+def _add_price_with_connection(c, record):
+    model, series, generation, platform, title, price, url = record
+    # 每条保留独立微秒时间戳，确保同批商品也有稳定的最新顺序。
+    ts = datetime.now().isoformat(sep=" ", timespec="microseconds")
+    old = None
+    if url:
+        row = c.execute("SELECT id FROM prices WHERE url=?", (url,)).fetchone()
+        if row:
+            old = {"id": row["id"]}
+    if url and old:
+        c.execute("""UPDATE prices SET model=?, series=?, generation=?, platform=?,
+                    title=?, price=?, ts=? WHERE id=?""",
+                  (model, series, generation, platform, title, price, ts, old["id"]))
+    else:
+        c.execute(
+            "INSERT INTO prices(model,series,generation,platform,title,price,url,ts) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (model, series, generation, platform, title, price, url, ts),
+        )
+    day = ts[:10]
+    if url:
+        daily = c.execute(
+            "SELECT id FROM price_history WHERE url=? AND substr(ts,1,10)=? "
+            "ORDER BY ts DESC LIMIT 1", (url, day),
+        ).fetchone()
+    else:
+        daily = c.execute(
+            "SELECT id FROM price_history WHERE model=? AND platform=? AND title=? "
+            "AND substr(ts,1,10)=? ORDER BY ts DESC LIMIT 1",
+            (model, platform, title, day),
+        ).fetchone()
+    if daily:
+        c.execute("""UPDATE price_history SET model=?, series=?, generation=?, platform=?,
+                    title=?, price=?, url=?, ts=? WHERE id=?""",
+                  (model, series, generation, platform, title, price, url, ts, daily["id"]))
+    else:
+        c.execute(
+            "INSERT INTO price_history(model,series,generation,platform,title,price,url,ts) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (model, series, generation, platform, title, price, url, ts),
+        )
 
 
 def reclassify_5090_rows(resolver):
@@ -164,7 +236,10 @@ def reclassify_5090_rows(resolver):
                         (precise, row["id"]),
                     )
                     changed += 1
+        revision = _bump_catalog_revision(c) if changed else None
         c.commit()
+        if revision is not None:
+            _revision_cache[DB_PATH] = revision
         return changed
 
 
@@ -201,7 +276,10 @@ def purge_legacy_noise(rejector, abs_min, low_ratio, high_ratio):
             c.execute("DELETE FROM prices WHERE id=?", (row["id"],))
         c.execute("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                   (migration_key, str(len(rejected))))
+        revision = _bump_catalog_revision(c) if rejected else None
         c.commit()
+        if revision is not None:
+            _revision_cache[DB_PATH] = revision
         return len(rejected)
 
 
@@ -271,7 +349,9 @@ def clear_price_data():
     with _lock, closing(_conn()) as c:
         c.execute("DELETE FROM prices")
         c.execute("DELETE FROM price_history")
+        revision = _bump_catalog_revision(c)
         c.commit()
+        _revision_cache[DB_PATH] = revision
 
 
 def history(model, platform=None):

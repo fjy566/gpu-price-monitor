@@ -55,6 +55,18 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(14500, rows[0]["price"])
         self.assertEqual("商品降价", rows[0]["title"])
 
+    def test_bulk_state_and_price_writes_use_one_catalog_revision(self):
+        db.set_states({"a": 1, "b": 2}, prefix="cfg_")
+        self.assertEqual({"a": "1", "b": "2"}, db.get_states({"a": "", "b": ""}, prefix="cfg_"))
+        before = db.catalog_revision()
+        records = [
+            ("RTX 5090", "RTX 50 系", 50, "闲鱼", f"商品 {index}", 15000 + index, f"https://{index}")
+            for index in range(5)
+        ]
+        self.assertEqual(5, db.add_prices(records))
+        self.assertEqual(before + 1, db.catalog_revision())
+        self.assertEqual(5, len(db.all_prices()))
+
 
 if __name__ == "__main__":
     unittest.main()

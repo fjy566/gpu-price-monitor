@@ -34,6 +34,7 @@ COLORS = {
     "orange": "#f5a623",
 }
 _chart_lock = threading.Lock()
+_render_cache = {}
 
 
 def _serialized(func):
@@ -76,7 +77,13 @@ def _save(fig, name):
 def price_trend(model, platform=None):
     """单日用箱型+散点展示分布，多日用每日中位数和四分位区间展示趋势。"""
     # 当前工作台只展示闲鱼，避免历史库中的旧平台污染图表。
-    hist = db.history(model, platform or "闲鱼")
+    active_platform = platform or "闲鱼"
+    name = _trend_filename(model)
+    version = (db.DB_PATH, db.catalog_revision(), model, active_platform)
+    path = os.path.join(CHART_DIR, name)
+    if _render_cache.get(("trend", model, active_platform)) == version and os.path.exists(path):
+        return f"charts/{name}"
+    hist = db.history(model, active_platform)
     if not hist:
         return None
     fig, ax = _figure((9, 4.5))
@@ -125,7 +132,9 @@ def price_trend(model, platform=None):
         legend = ax.legend(facecolor=COLORS["panel"], edgecolor=COLORS["grid"])
         for text in legend.get_texts():
             text.set_color(COLORS["text"])
-    return _save(fig, _trend_filename(model))
+    result = _save(fig, name)
+    _render_cache[("trend", model, active_platform)] = version
+    return result
 
 
 def _percentile(values, fraction):
@@ -140,9 +149,13 @@ def _percentile(values, fraction):
 
 
 @_serialized
-def series_summary():
+def series_summary(rows=None, revision=None):
     """用点区间图展示每个型号的价格分布、最低价、中位价和平均价。"""
-    rows = db.distinct_items(platform="闲鱼")
+    version = (db.DB_PATH, db.catalog_revision() if revision is None else revision)
+    output_path = os.path.join(CHART_DIR, "model_summary.png")
+    if _render_cache.get("series_summary") == version and os.path.exists(output_path):
+        return "charts/model_summary.png"
+    rows = db.distinct_items(platform="闲鱼") if rows is None else rows
     real = [r for r in rows if "演示" not in (r.get("title") or "")]
     pool = real if real else rows
     if not pool:
@@ -184,14 +197,20 @@ def series_summary():
     for text in legend.get_texts():
         text.set_color(COLORS["text"])
     ax.grid(True, axis="x", color=COLORS["grid"], alpha=0.7)
-    return _save(fig, "model_summary.png")
+    result = _save(fig, "model_summary.png")
+    _render_cache["series_summary"] = version
+    return result
 
 
 @_serialized
-def per_model_chart(stats_info=None):
+def per_model_chart(stats_info=None, revision=None):
     """各型号平均价条形图。"""
     if not stats_info or not stats_info.get("per_model"):
         return None
+    version = (db.DB_PATH, db.catalog_revision() if revision is None else revision)
+    output_path = os.path.join(CHART_DIR, "per_model.png")
+    if _render_cache.get("per_model") == version and os.path.exists(output_path):
+        return "charts/per_model.png"
     pm = stats_info["per_model"]
     # 按生成系列排序
     names = list(pm.keys())
@@ -210,4 +229,6 @@ def per_model_chart(stats_info=None):
     ax.set_xlabel("平均价 (元)")
     ax.set_title("各型号平均价 (真实数据)")
     ax.grid(True, axis="x", color=COLORS["grid"], alpha=0.7)
-    return _save(fig, "per_model.png")
+    result = _save(fig, "per_model.png")
+    _render_cache["per_model"] = version
+    return result

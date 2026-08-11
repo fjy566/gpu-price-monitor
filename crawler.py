@@ -27,12 +27,16 @@ import subprocess
 import threading
 import time
 import traceback
+from collections import deque
 from datetime import datetime
 from urllib.parse import quote_plus, urljoin
+from queue import Queue
 
 from playwright.sync_api import sync_playwright
 
 import database as db
+from settings_store import DEFAULT_SETTINGS, get_settings, save_settings
+from listing_pipeline import FilterPolicy, ListingFilter
 
 # 限速参数（秒）
 MIN_DELAY = 3.0
@@ -60,75 +64,6 @@ ACTIVE_PLATFORM_LABEL = _PLATFORM_LABEL[ACTIVE_PLATFORM_NAMES[0]]
 # ------------------------------------------------------------------
 # 可配置的噪声过滤阈值（后台可改，存于 state 表）
 # ------------------------------------------------------------------
-DEFAULT_SETTINGS = {
-    "abs_min": "500",       # 绝对下限：低于此价视为引流标价（元）
-    "low_ratio": "0.55",    # 低于中位数*此比例 视为噪声
-    "high_ratio": "3.0",    # 高于中位数*此倍数 视为噪声
-    "keep_min": "1",        # 是否保留真实最低价（不被噪声过滤误杀）
-    "exclude_mobile": "1",  # 是否过滤笔记本/Mobile显卡（4080m等）
-    "browser_mode": "minimized",  # 浏览器模式: silent=静默无头 | visible=可视化(登录) | minimized=可视化+最小化(推荐采集)
-    "crawl_mode": "browser",  # 当前唯一采集通道：Playwright 模拟浏览器
-    # ---- 采集范围（当前固定为闲鱼） ----
-    "selected_platforms": "goofish",
-    "selected_models": "",     # 如 RTX 5070,RTX 5080
-    "watched_models": "",      # 关注型号（推荐算法优先推送）如 RTX 5080,RTX 5070
-}
-
-
-def get_settings():
-    settings = {k: db.get_state("cfg_" + k, v) for k, v in DEFAULT_SETTINGS.items()}
-    # 迁移旧版本配置：不让历史的 http/api/多平台设置继续影响当前产品。
-    settings["crawl_mode"] = "browser"
-    settings["selected_platforms"] = "goofish"
-    return settings
-
-
-def save_settings(data):
-    """校验并原子化保存设置；无效输入不会留下部分更新。"""
-    normalized = {}
-    for k, v in (data or {}).items():
-        if k not in DEFAULT_SETTINGS:
-            continue
-        if k == "crawl_mode":
-            value = str(v).strip()
-            if value != "browser":
-                raise ValueError("当前仅支持模拟浏览器采集")
-            value = "browser"
-        elif k == "browser_mode":
-            value = str(v).strip()
-            if value not in {"silent", "visible", "minimized"}:
-                raise ValueError("浏览器模式无效")
-        elif k in {"abs_min", "low_ratio", "high_ratio"}:
-            try:
-                number = float(v)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{k} 必须是数字") from exc
-            if not math.isfinite(number):
-                raise ValueError(f"{k} 必须是有限数字")
-            if k == "abs_min" and not (0 <= number <= 1_000_000):
-                raise ValueError("绝对下限必须在 0 到 1000000 之间")
-            if k == "low_ratio" and not (0 < number <= 1):
-                raise ValueError("低价比例必须大于 0 且不超过 1")
-            if k == "high_ratio" and not (1 <= number <= 20):
-                raise ValueError("高价倍数必须在 1 到 20 之间")
-            value = format(number, "g")
-        elif k in {"keep_min", "exclude_mobile"}:
-            value = "1" if v in (True, 1, "1", "true", "True", "on") else "0"
-        elif k == "selected_platforms":
-            parts = [x.strip() for x in str(v or "").split(",") if x.strip()]
-            if any(x != "goofish" for x in parts):
-                raise ValueError("当前仅支持闲鱼平台")
-            value = "goofish"
-        else:
-            parts = [x.strip() for x in str(v or "").split(",") if x.strip()]
-            if any(len(x) > 40 or any(ch in x for ch in "\r\n\x00") for x in parts):
-                raise ValueError("型号设置包含无效值")
-            value = ",".join(dict.fromkeys(parts))
-        normalized[k] = value
-    for k, value in normalized.items():
-        db.set_state("cfg_" + k, value)
-    return get_settings()
-
 # ------------------------------------------------------------------
 # 真实 Chrome 定位
 # ------------------------------------------------------------------
@@ -705,14 +640,12 @@ class BrowserManager:
         self._browser = None
         self._context = None
         self._thread = None
-        self._queue = []
-        self._queue_lock = threading.Lock()
+        self._queue = Queue()
         self._state_lock = threading.Lock()
         self._running = False
         self._starting = False
         self.ready = False
         self.last_error = ""
-        self._seq = 0
         self.headless = headless   # True=静默采集（不弹窗口）；登录二维码改由后台截图/前端展示
         self.minimized = False
 
@@ -721,10 +654,7 @@ class BrowserManager:
         """把操作交给浏览器线程执行，阻塞等待结果。返回 (ok, result)。"""
         done = threading.Event()
         slot = {}
-        with self._queue_lock:
-            self._seq += 1
-            seq = self._seq
-            self._queue.append((seq, op, args, done, slot))
+        self._queue.put((op, args, done, slot))
         done.wait(timeout=timeout)
         if not done.is_set():
             slot["cancelled"] = True
@@ -732,27 +662,26 @@ class BrowserManager:
         return slot.get("ok"), slot.get("result")
 
     def _process_queue(self):
-        while self._running:
-            job = None
-            with self._queue_lock:
-                if self._queue:
-                    job = self._queue.pop(0)
-            if job:
-                seq, op, args, done, slot = job
-                if slot.get("cancelled"):
-                    done.set()
-                    continue
-                try:
-                    ok, result = op(*args)
-                    slot["ok"] = ok
-                    slot["result"] = result
-                except Exception as e:
-                    slot["ok"] = False
-                    slot["result"] = {"msg": str(e)}
-                finally:
-                    done.set()
-            else:
-                time.sleep(0.05)
+        while True:
+            job = self._queue.get()
+            if job is None:
+                self._queue.task_done()
+                break
+            op, args, done, slot = job
+            if slot.get("cancelled"):
+                done.set()
+                self._queue.task_done()
+                continue
+            try:
+                ok, result = op(*args)
+                slot["ok"] = ok
+                slot["result"] = result
+            except Exception as e:
+                slot["ok"] = False
+                slot["result"] = {"msg": str(e)}
+            finally:
+                done.set()
+                self._queue.task_done()
 
     # ---------- 浏览器线程内的实际操作 ----------
     def _boot_impl(self, headless=True, minimized=False):
@@ -1032,6 +961,8 @@ class BrowserManager:
             if not ok:
                 self.last_error = str((res or {}).get("msg", "启动失败"))
                 self._submit(self._close_impl)
+                self._running = False
+                self._queue.put(None)
             return ok, res
         finally:
             with self._state_lock:
@@ -1069,11 +1000,13 @@ class BrowserManager:
             self._submit(self._close_impl)
         self._running = False
         self.ready = False
+        self._queue.put(None)
         thread = self._thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
         if not thread or not thread.is_alive():
             self._thread = None
+            self._queue = Queue()
 
     @property
     def is_ready(self):
@@ -1111,7 +1044,7 @@ class Crawler:
         self._round_total = 0
         self._round_done = 0
         self.current_task = ""      # 当前正在采集的任务描述（用于日志）
-        self.task_history = []      # 最近 N 条采集日志 (list of dict) max 100
+        self.task_history = deque(maxlen=100)  # O(1) 追加并自动淘汰旧日志
         self._last_transport_note = ""
 
     # ---- 控制接口 ----
@@ -1126,15 +1059,16 @@ class Crawler:
             self.last_error = ""
             self.items_found = 0
             self._last_transport_note = ""
-            db.set_state("last_error", "")
-            db.set_state("session_items_found", "0")
+            db.set_states({"last_error": "", "session_items_found": "0"})
             try:
                 from gpus import get_all_models
+                debug_states = {}
                 for platform in self.platforms:
                     if platform.name not in ACTIVE_PLATFORM_NAMES:
                         continue
                     for model in get_all_models():
-                        db.set_state(f"debug_{platform.name}_{model['name'].replace(' ', '')}", "")
+                        debug_states[f"debug_{platform.name}_{model['name'].replace(' ', '')}"] = ""
+                db.set_states(debug_states)
             except Exception:
                 # 清理诊断状态不应阻止正式采集启动。
                 pass
@@ -1191,8 +1125,7 @@ class Crawler:
             if self._running:
                 self.rounds += 1
                 self.last_run = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                db.set_state("last_run", self.last_run)
-                db.set_state("rounds", self.rounds)
+                db.set_states({"last_run": self.last_run, "rounds": self.rounds})
                 self.status = "completed"
                 self._log("本次采集已完成：每个选中型号各采集一轮", "ok")
         except Exception:
@@ -1216,8 +1149,6 @@ class Crawler:
         from datetime import datetime as _dt
         entry = {"ts": _dt.now().strftime("%H:%M:%S"), "level": level, "msg": msg}
         self.task_history.append(entry)
-        if len(self.task_history) > 100:
-            self.task_history = self.task_history[-100:]
 
     def _one_round(self):
         from gpus import get_all_models, infer_model
@@ -1254,7 +1185,7 @@ class Crawler:
                 self._log(self.current_task)
                 db.set_state("current_task", self.current_task)
                 try:
-                    self._fetch_model(pc, model)
+                    self._fetch_model(pc, model, cfg)
                 except Exception as e:
                     db.set_state("last_error", f"{pc.name}: {e}")
                 self._round_done += 1
@@ -1325,70 +1256,59 @@ class Crawler:
             self._last_transport_note = "浏览器页面已打开，但未匹配到商品卡片/价格"
         return result
 
-    def _filter_items(self, model, items):
+    def _filter_items(self, model, items, policy=None):
         """统一过滤型号错配、非整卡/引流/高风险标题和价格离群点。"""
-        cfg = get_settings()
-        abs_min = float(cfg["abs_min"])
-        low_ratio = float(cfg["low_ratio"])
-        high_ratio = float(cfg["high_ratio"])
-        import statistics
-        from gpus import title_matches_model, is_desktop_gpu, listing_rejection_reason
+        active_policy = policy or FilterPolicy.from_settings(get_settings())
+        kept, stats = ListingFilter(active_policy).filter(model["name"], items)
+        return kept, stats.as_dict()
 
-        matched = []
-        rejected_content = 0
-        rejected_mobile = 0
-        for title, price, url in items:
-            if not price or not title_matches_model(title, model["name"]):
-                continue
-            if listing_rejection_reason(title):
-                rejected_content += 1
-                continue
-            if cfg.get("exclude_mobile", "1") == "1" and not is_desktop_gpu(title):
-                rejected_mobile += 1
-                continue
-            matched.append((title, price, url))
-        valid = [price for _, price, _ in matched if price >= abs_min]
-        med = statistics.median(valid) if valid else 0
-        low_thr = max(abs_min, med * low_ratio) if valid else abs_min
-        high_thr = max(med, med * high_ratio) if valid else float("inf")
-        kept = [item for item in matched if low_thr <= item[1] <= high_thr]
-        return kept, {
-            "matched": len(matched), "valid": len(valid), "kept": len(kept), "median": med,
-            "content": rejected_content, "mobile": rejected_mobile,
-            "price": max(0, len(matched) - len(kept)),
-        }
-
-    def _stream_store_batch(self, pc, model, batch, streamed_urls):
+    def _stream_store_batch(self, pc, model, batch, streamed_urls, policy=None):
         """整轮完成前逐页过滤并入库，让前端实时看到新商品。"""
         if not self._running:
             return False
-        kept, _ = self._filter_items(model, batch)
+        kept, _ = self._filter_items(model, batch, policy)
+        fresh = []
         for title, price, url in kept:
             key = url or f"{title}\x00{price}"
             if key in streamed_urls:
                 continue
-            self._store_item(pc, model, title, price, url)
             streamed_urls.add(key)
+            fresh.append((title, price, url))
+        self._store_items(pc, model, fresh)
         return self._running
+
+    def _store_items(self, pc, model, items):
+        """一次事务写入一个页面的商品，并逐条发布日志。"""
+        if not items:
+            return 0
+        platform = _PLATFORM_LABEL[pc.name]
+        records = [
+            (model["name"], model.get("series", "其他"), model.get("generation", 0),
+             platform, title, price, url)
+            for title, price, url in items
+        ]
+        db.add_prices(records)
+        self.items_found += len(records)
+        db.set_state("session_items_found", str(self.items_found))
+        for title, price, _ in items:
+            self._log(f"{platform} {model['name']} 已入库：{title[:42]} ¥{price:g}", "ok")
+        return len(records)
 
     def _store_item(self, pc, model, title, price, url):
         """Persist one accepted item immediately and publish its progress."""
-        db.add_price(model["name"], model.get("series", "其他"), model.get("generation", 0),
-                     _PLATFORM_LABEL[pc.name], title, price, url)
-        self.items_found += 1
-        db.set_state("session_items_found", str(self.items_found))
-        self._log(f"{_PLATFORM_LABEL[pc.name]} {model['name']} 已入库：{title[:42]} ¥{price:g}", "ok")
+        return self._store_items(pc, model, [(title, price, url)])
 
-    def _fetch_model(self, pc, model):
+    def _fetch_model(self, pc, model, cfg=None):
         self._last_transport_note = ""
         kws = [model["name"].replace(" ", "")]
-        cfg = get_settings()
+        cfg = cfg or get_settings()
         mode = cfg.get("crawl_mode", "browser")
+        policy = FilterPolicy.from_settings(cfg)
         items = []
         seen = set()
         streamed_urls = set()
         def on_batch(batch):
-            return self._stream_store_batch(pc, model, batch, streamed_urls)
+            return self._stream_store_batch(pc, model, batch, streamed_urls, policy)
         for kw in kws:
             if not self._running:
                 break
@@ -1412,12 +1332,14 @@ class Crawler:
                     break   # 命中一个通道就够，不再降级
 
         if items:
-            kept_list, stats = self._filter_items(model, items)
+            kept_list, stats = self._filter_items(model, items, policy)
+            fresh = []
             for title, price, url in kept_list:
                 key = url or f"{title}\x00{price}"
                 if key not in streamed_urls:
-                    self._store_item(pc, model, title, price, url)
                     streamed_urls.add(key)
+                    fresh.append((title, price, url))
+            self._store_items(pc, model, fresh)
             db.set_state(f"debug_{pc.name}_{model['name'].replace(' ','')}",
                          f"raw={len(items)} matched={stats['matched']} valid={stats['valid']} "
                          f"stored={len(streamed_urls)} med={round(stats['median'],0)} "

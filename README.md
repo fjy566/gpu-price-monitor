@@ -1,144 +1,251 @@
-# GPU 显卡价格监控中心
+# GPU Price Monitor
 
-从 **闲鱼** 获取 RTX 30/40/50 系显卡价格，归类展示、绘制价格走势、推荐“最划算”的显卡和购买链接。
-提供统一的 **Web 控制台**，支持开始 / 暂停 / 继续 / 停止采集；当前产品固定使用 Playwright 模拟浏览器。
+一个面向个人研究和价格观察的 GPU 价格监控工具。项目使用 Flask 提供 Web 控制台，使用 Playwright 驱动独立 Chromium 浏览器采集闲鱼公开搜索结果，并把当前价格、每日历史、统计图表和推荐结果统一展示出来。
 
----
+> 仅用于个人学习、研究和价格观察。请遵守闲鱼及其他服务的用户协议、robots 规则和适用法律；不要绕过登录、验证码、访问控制或平台风控，也不要高频访问平台。
 
-## ⚠️ 合规说明（请先读，重要）
+## 当前定位
 
-本项目**不包含任何反爬对抗技术**：
+- 采集方式：仅保留“模拟浏览器”，不把传统 HTTP/API 作为主采集入口。
+- 采集平台：当前界面和主流程固定使用闲鱼（Goofish）。
+- 采集范围：内置 RTX 30/40/50 系列型号，也支持添加自定义型号。
+- 采集周期：一次点击“开始采集”只完成一轮；本轮每个型号只采集一次，完成后浏览器自动关闭。
+- 浏览器：使用项目专用 Chromium profile，不复用日常浏览器。首次使用闲鱼时，需要在控制台打开登录页并扫码验证。
+- 数据：当前价格按商品 URL 去重；历史价格按商品和自然日去重，每天保留当天最后一次采样。
 
-- ❌ 无指纹伪装、无验证码自动绕过、无代理池轮换、无风控规避
-- ✅ 仅使用闲鱼**官方扫码登录** + **公开页面礼貌采集**（限速、随机延时、尊重服务器）
+## 功能
 
-- **闲鱼** 对无登录态和自动化访问有多重限制，浏览器模式需要使用项目专用 Chrome 完成扫码登录。
-- 采集器会读取闲鱼搜索结果并自动翻页；价格解析兼容 `¥3.26万` 等分行展示，商品按页面增量写入数据库。
-- 数据仅供个人学习研究，请勿用于商业用途。
+- 闲鱼搜索结果的浏览器采集、滚动和分页
+- 采集结果逐页批量写入 SQLite
+- GPU 型号精确匹配，包括 `RTX 5090`、`RTX 5090 D`、`RTX 5090 D V2`
+- 过滤低价引流、非显卡商品、维修/坏卡/拆机/矿卡和明显欺诈标题
+- 自定义型号添加、删除
+- 内置型号隐藏、恢复
+- 当前价格、每日历史、最低价/平均价/中位数统计
+- 单日数据箱型图 + 散点图，多日数据趋势图
+- 低价推荐和可信度惩罚
+- 采集进度、运行状态、任务日志
+- CSV 导出
+- SQLite WAL、批量事务、快照缓存和前端增量刷新
 
----
+## 快速开始
 
-## 🚀 快速开始
+### 1. 创建虚拟环境
 
-```bash
-cd gpu-price-monitor
+Windows PowerShell：
+
+```powershell
+cd F:\source\Python\gpu-price-monitor
 python -m venv .venv
-# Windows PowerShell
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-# 首次：如有系统Chrome可跳过；否则安装 Playwright 内核
+python -m pip install -r requirements.txt
 playwright install chromium
+```
 
+如果系统中的 `python` 不是刚创建的虚拟环境解释器，请使用虚拟环境的绝对路径运行后续命令。
+
+### 2. 启动服务
+
+```powershell
 python app.py
 ```
 
-打开浏览器访问 **`http://127.0.0.1:5000`**。
+默认访问地址：<http://127.0.0.1:5000>
 
-请始终使用上面的 `python app.py` 入口，不要使用 `flask run`；后者可能把同步 Playwright 放进 asyncio 事件循环，触发 “Please use the Async API instead” 错误。需要换端口时可设置 `GPU_MONITOR_PORT`（例如 `GPU_MONITOR_PORT=5001 python app.py`）。
+如需更换端口：
 
-> 若你的 `python` 命令指向的不是带依赖的解释器，请用 `E:\ProgramData\anaconda3\python.exe app.py`
-> 这类完整路径（本机安装时以实际为准）。
-
----
-
-## 🖥️ 使用流程（浏览器采集方式）
-
-1. **配置采集来源**
-   - 默认是「模拟浏览器」方式 + 最小化窗口（采集时不打扰前台）。
-   - 点 **🚀 启动浏览器**，会启动一个**专用持久化 Chrome**（独立于你的日常 Chrome，非无痕，
-     profile 保存在 `.chrome_profile/`，登录一次长期有效）。
-2. **登录闲鱼**
-   - 在「🔐 闲鱼登录」面板，点「打开登录页」→ 用手机 App 扫码 → 点「校验」。
-3. **选采集范围**
-   - 在「🎯 采集范围 & 关注型号」选择型号并点击「保存」；平台固定为闲鱼。
-   - 型号卡片内的 **⭐** 为「关注」，推荐算法会优先推送关注型号。
-   - 支持「＋ 添加型号」自定义（输入任意型号名）；自定义型号可删除，内置型号可隐藏并随时恢复。
-4. **开始采集**
-   - 点 **▶ 开始采集**。采集在后台静默运行，日志面板实时显示「正在采集 闲鱼 RTX 5080」。
-
----
-
-## 🔧 唯一采集方式：模拟浏览器
-
-Playwright 驱动项目专用 Chrome，闲鱼自动翻页并逐条写入价格库。页面不再提供 HTTP、官方 API 或自动降级选项，避免采集结果和登录状态不一致。
-
-> 浏览器默认「最小化」模式：有头（能采到真实数据）+ 窗口最小化不打扰。
-> 登录扫码时可切「可视化」看窗口；彻底不弹窗可切「静默」（可能采不到数据）。
-
----
-
-## 🧠 核心特性
-
-- **闲鱼自动翻页**：通过读取当前页号、点击下一页页码/箭头采集后续页面，不调用未公开内部接口。
-- **增量入库**：每个闲鱼页面解析完成后立即写入价格库，管理台约 2 秒轮询一次即可看到新商品。
-- **入库去重（UPSERT）**：同一商品（URL）只保留最新一条，`price_history` 表保存价格变化
-  快照用于走势图，多轮采集不冗余。
-- **噪声过滤**：绝对下限 + 中位数/均值比例 + 型号匹配校验 + 过滤笔记本/Mobile 显卡（4080m 等），
-  且**保留真实最低价**不被误杀；阈值可在后台「⚙️ 噪声过滤阈值」配置。
-- **推荐算法**：为每个型号建市场基准（中位数），按"比市场价折扣 + 可信度 + 关注加权"打分，
-  推荐**最划算**（非最低价）的 Top N，附购买链接和理由。
-- **关注型号**：一键 ⭐ 关注，推荐优先推送；价格列表「只看关注」一键过滤。
-- **价格走势图**：基于 price_history，按闲鱼型号生成走势。
-- **数据导出**：一键导出 CSV（UTF-8 BOM，Excel 直接打开）。
-
----
-
-## 📊 Web 控制台功能一览
-
-| 模块 | 说明 |
-|------|------|
-| 📊 统计卡片 | 在测型号、已采集数据量、爬取轮次、今日最佳价 |
-| ⭐ 关注型号行情速览 | 关注型号的最低/均价/中位数卡片 |
-| 🕹️ 采集控制台 | 启动浏览器、开始/暂停/继续/停止、固定采集通道、状态徽章、进度条 |
-| ⚙️ 噪声过滤阈值 | 可配置绝对下限、中位数比例、保留最低价等 |
-| 🎯 采集范围 & 关注型号 | 固定闲鱼、⭐关注、自定义添加/删除型号 |
-| 🔐 闲鱼登录 | 闲鱼打开登录页 / 校验、浏览器模式切换 |
-| 🏆 今日最佳推荐 | 推荐算法的 Top N 划算显卡 + 购买链接 |
-| 📐 数据统计 | 均价/中位数/最低/最高、型号覆盖、平台分布 |
-| 📊 各型号价格概览 | 型号级平均/最低价条形图 |
-| 📋 全部价格 | 搜索/系列/价格区间/只看关注筛选 + 翻页 |
-| 📜 采集日志 | 实时"正在采集 xxx" + 各型号抓取/保留统计 |
-
----
-
-## 📁 目录结构
-
-```
-gpu-price-monitor/
-├── app.py            # Flask 入口 + 全部 API 路由
-├── crawler.py        # 采集核心（浏览器单线程Worker + 翻页 + 暂停/继续/停止 + 进度）
-├── http_crawler.py   # 旧版公开页解析器（当前 Web 入口不启用）
-├── api_panel.py      # 旧版 API 配置兼容模块（当前 Web 入口不启用）
-├── gpus.py           # 显卡型号清单、归类、标题匹配、Mobile过滤、自定义型号
-├── database.py       # SQLite 存储（去重 UPSERT + price_history 走势历史）
-├── charts.py         # matplotlib 图表（走势/型号概览/统计）
-├── recommend.py      # 推荐算法（最划算 Top N）
-├── requirements.txt
-├── templates/index.html  # 前端页面
-├── static/           # style.css / app.js / charts/
-└── prices.db         # SQLite 数据文件（自动生成）
+```powershell
+$env:GPU_MONITOR_PORT = "5001"
+python app.py
 ```
 
----
+请使用 `python app.py` 启动，不建议使用 `flask run`。采集器使用 Playwright 的同步 API；把它放进异步事件循环可能出现：
 
-## 🐛 常见问题
+```text
+It looks like you are using Playwright Sync API inside the asyncio loop
+```
 
-**Q: 点了开始采集没反应 / 提示请先启动浏览器？**
-A: 当前唯一采集方式是模拟浏览器，需要先点「🚀 启动浏览器」，再完成闲鱼扫码并校验登录。
+### 3. 首次登录闲鱼
 
-**Q: 闲鱼采集不到数据 / 日志“无数据”？**
-A: 确认专用浏览器已启动、闲鱼登录态显示“已登录”，并检查闲鱼页面是否出现访问验证。
+1. 打开 Web 控制台。
+2. 点击“闲鱼登录”，在项目专用浏览器中完成扫码。
+3. 点击“校验登录”，确认状态显示为已登录。
+4. 选择要采集的型号并开始采集。
 
-**Q: 数据太多重复？**
-A: 已实现按 URL 去重（UPSERT），同一商品只保留最新；多轮采集不冗余。
+浏览器会话保存在 `.sessions/`，专用 Chromium 数据保存在 `.chrome_profile/`。这两个目录包含登录态，不能提交到 Git，也不要分享给他人。
 
-**Q: 走势图没数据？**
-A: 走势基于 price_history，需同一商品价格发生过变化（或首次采集）才有历史点。
+## 使用流程
 
----
+```text
+选择型号
+  ↓
+配置关注型号和过滤阈值
+  ↓
+打开并验证闲鱼登录
+  ↓
+开始采集
+  ↓
+浏览器逐个处理型号
+  ↓
+过滤和批量保存商品
+  ↓
+查看价格、趋势、推荐和日志
+  ↓
+本轮结束，浏览器自动退出
+```
 
-## 🔐 合规与免责
+如果要再次采集，需要再次点击开始采集。程序不会在后台自动无限循环采集。
 
-- 本项目仅用于个人学习研究；数据仅供观察。
-- 请遵守各平台用户协议、robots.txt 与《网络安全法》等法规。
-- 使用本项目造成的后果由使用者自负。
+## 数据规则
+
+### 当前价格
+
+`prices` 表保存每个商品的最新状态。相同商品 URL 再次出现时，会更新标题、价格和更新时间，不会产生重复当前商品。
+
+### 每日历史
+
+`price_history` 表保存商品的每日快照：
+
+- 同一商品当天采集多次：更新当天快照，保留最后一次采样。
+- 第二天再次采集：新增第二天快照，前一天历史保留。
+- 新 URL 商品：当天新增一条历史记录。
+
+因此，当前页面展示最新市场状态，趋势图使用按日保留的历史数据。
+
+### 价格过滤
+
+过滤器会综合判断标题、型号、价格和商品属性，例如：
+
+- 价格明显低于型号基准的引流商品
+- “仅包装/支架/散热器/配件”等非显卡商品
+- “维修、坏卡、拆机、矿卡、工程样品”等商品
+- 型号不匹配或把基础型号与 Ti/Super/V2 混写的商品
+
+过滤并不保证平台商品真实可靠，最终仍应打开原始链接核验卖家、成色、保修和交易条件。
+
+## 项目架构
+
+```text
+浏览器前端
+    │
+    ▼
+Flask API（app.py）
+    ├── Crawler / BrowserManager（crawler.py）
+    │      └── GoofishCrawler：闲鱼浏览器采集
+    ├── ListingFilter（listing_pipeline.py）
+    ├── Database（database.py）
+    ├── MarketSnapshot（market_data.py）
+    ├── Charts（charts.py）
+    ├── Recommend（recommend.py）
+    ├── GPU model registry（gpus.py）
+    └── Settings cache（settings_store.py）
+```
+
+核心数据流：
+
+```text
+Playwright 页面
+  → 商品卡片解析
+  → 型号和价格规范化
+  → ListingFilter 过滤
+  → database.add_prices 批量写入
+  → catalog_revision 递增
+  → market_data 快照失效
+  → 前端按 revision 增量刷新
+```
+
+## 文件说明
+
+| 文件 | 作用 |
+| --- | --- |
+| `app.py` | Flask 入口、页面渲染和全部 Web API 路由 |
+| `crawler.py` | Playwright 浏览器生命周期、采集队列、闲鱼采集和单轮调度 |
+| `database.py` | SQLite 初始化、状态、当前价格、历史价格和批量事务 |
+| `gpus.py` | GPU 型号目录、精确匹配、5090 变体、自定义/隐藏型号 |
+| `listing_pipeline.py` | 商品过滤策略和过滤统计，独立于 Flask/浏览器 |
+| `market_data.py` | 当前市场数据快照和 revision 缓存 |
+| `settings_store.py` | 设置默认值、校验、缓存和持久化 |
+| `charts.py` | 趋势图、概览图、单日箱型/散点图和图表缓存 |
+| `recommend.py` | 基于市场基准和可信度的低价推荐 |
+| `http_crawler.py` | 备用 HTTP 解析器；当前不是主采集入口 |
+| `api_panel.py` | 备用平台 API 配置和调用兼容层 |
+| `templates/index.html` | Web 控制台 HTML 模板 |
+| `static/app.js` | 页面初始化、API 调用、状态轮询和交互逻辑 |
+| `static/style.css` | 深色玻璃卡片、响应式布局和统一视觉 token |
+| `static/charts/` | 运行时生成的图表 PNG |
+| `tests/` | Flask、采集器、数据库、过滤器、图表、推荐和前端静态检查 |
+| `docs/plans/` | 审查记录、设计方案和性能架构说明 |
+| `requirements.txt` | Python 运行依赖 |
+
+## API 概览
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /` | 控制台页面 |
+| `POST /api/control/start` | 启动专用浏览器 |
+| `POST /api/control/start_crawl` | 开始一轮采集 |
+| `POST /api/control/pause` | 暂停采集 |
+| `POST /api/control/resume` | 恢复采集 |
+| `POST /api/control/stop` | 停止采集并关闭浏览器 |
+| `GET /api/status` | 浏览器、任务、进度和数据状态 |
+| `GET /api/prices` | 当前价格；支持 `since=<revision>` 增量请求 |
+| `GET /api/history` | 商品历史价格 |
+| `GET /api/trend` | 型号趋势数据 |
+| `GET /api/series_chart` | 趋势图 |
+| `GET /api/stats` | 市场统计和概览图 |
+| `GET /api/recommend` | 低价推荐 |
+| `GET /api/log` | 采集日志 |
+| `GET/POST/PATCH/DELETE /api/models` | 型号查询、添加、隐藏、恢复和删除 |
+| `GET/POST /api/settings` | 过滤和采集设置 |
+| `GET /api/export` | CSV 导出 |
+| `POST /api/clear` | 清理价格数据 |
+
+## 性能设计
+
+- SQLite 使用 WAL，降低读写互相阻塞。
+- 商品页面按批次写入，减少事务提交次数。
+- 型号、设置和市场统计使用内存缓存。
+- 前端通过 `catalog_revision` 判断数据是否变化。
+- 数据未变化时，`/api/prices?since=...` 只返回很小的 unchanged 响应。
+- 图表按数据库路径、平台、型号和 revision 缓存。
+- 采集任务使用阻塞队列，避免空轮询消耗 CPU。
+
+## 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+也可以先做静态检查：
+
+```powershell
+python -m py_compile app.py crawler.py database.py gpus.py http_crawler.py charts.py recommend.py listing_pipeline.py market_data.py settings_store.py
+node --check static/app.js
+git diff --check
+```
+
+## 运行文件和备份
+
+以下文件/目录属于本地运行环境，通常不应提交：
+
+```text
+prices.db
+.sessions/
+.chrome_profile/
+__pycache__/
+server*.log
+flask*.log
+```
+
+可以在升级前复制 `prices.db` 作为备份。项目中已有的 `prices.before_filter_20260810.db` 是历史过滤规则升级前的备份。
+
+## 已知边界
+
+- 闲鱼是否返回结果受登录状态、页面风控、网络质量和平台页面结构影响。
+- 浏览器采集比纯 HTTP 请求消耗更多 CPU 和内存，但更接近用户实际访问路径。
+- SQLite 适合单机、低并发部署；如果未来需要多进程、多用户并行写入，应迁移到 PostgreSQL 等服务型数据库。
+- 图表 PNG 和浏览器缓存是运行时产物，删除后会在需要时重新生成。
+
+## 许可证与责任
+
+仓库当前未声明开源许可证。除非项目所有者另行授权，请不要将代码或采集结果用于商业分发。使用本项目产生的访问、交易和合规责任由使用者自行承担。

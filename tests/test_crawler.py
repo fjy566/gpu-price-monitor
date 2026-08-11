@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import PropertyMock, patch
 
@@ -74,6 +75,15 @@ class CrawlerTests(unittest.TestCase):
         worker.resume()
         self.assertEqual("stopped", worker.status)
 
+    def test_idle_browser_worker_blocks_and_stops_cleanly(self):
+        manager = crawler.BrowserManager()
+        manager._running = True
+        manager._thread = threading.Thread(target=manager._process_queue, daemon=True)
+        manager._thread.start()
+        manager.close()
+        self.assertIsNone(manager._thread)
+        self.assertFalse(manager._running)
+
     def test_browser_start_error_releases_running_flag(self):
         worker = crawler.Crawler()
         worker._running = True
@@ -137,14 +147,14 @@ class CrawlerTests(unittest.TestCase):
             patch("crawler.get_settings", return_value=settings),
             patch.object(worker, "_collect_via", return_value=[("蓝宝石 RX 7900 XTX 24G", 6000, "https://item")]),
             patch.object(worker, "_transport_order", return_value=["http"]),
-            patch("crawler.db.add_price") as add_price,
+            patch("crawler.db.add_prices") as add_prices,
             patch("crawler.db.set_state"),
-            patch("crawler.time.sleep"),
+            patch("crawler.random.uniform", return_value=0),
         ):
             worker._fetch_model(pc, model)
-        add_price.assert_called_once()
-        args = add_price.call_args.args
-        self.assertEqual(("RX 7900 XTX", "RX 7000 系", 70), args[:3])
+        add_prices.assert_called_once()
+        records = add_prices.call_args.args[0]
+        self.assertEqual(("RX 7900 XTX", "RX 7000 系", 70), records[0][:3])
 
 
 if __name__ == "__main__":

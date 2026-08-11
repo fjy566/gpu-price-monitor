@@ -7,7 +7,9 @@ from flask import Flask, jsonify, render_template, request
 
 import database as db
 import charts
-from crawler import ACTIVE_PLATFORM_LABEL, ACTIVE_PLATFORM_NAMES, crawler, get_settings
+import market_data
+from crawler import ACTIVE_PLATFORM_LABEL, ACTIVE_PLATFORM_NAMES, crawler
+from settings_store import get_settings, save_settings
 from gpus import (PLATFORM_API_DOC, detect_5090_variant, is_desktop_gpu,
                   listing_rejection_reason)
 
@@ -60,7 +62,7 @@ def index():
 @app.route("/api/control/start", methods=["POST"])
 def control_start():
     """启动浏览器（本项目专用持久化 profile，复用已登录会话）。"""
-    from crawler import manager, CHROME_PATH, PROFILE_DIR, get_settings
+    from crawler import manager, CHROME_PATH, PROFILE_DIR
     if manager.is_ready:
         return jsonify({"ok": True, "msg": "浏览器已在运行"})
     import threading
@@ -174,6 +176,7 @@ def control_stop():
 
 @app.route("/api/status")
 def status():
+    snapshot = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL)
     login_state = []
     for pc in crawler.platforms:
         if pc.name not in ACTIVE_PLATFORM_KEYS:
@@ -183,7 +186,8 @@ def status():
     return jsonify({
         "status": crawler.status,
         "rounds": crawler.rounds,
-        "items_found": db.current_price_count(ACTIVE_PLATFORM_LABEL),
+        "items_found": len(snapshot.rows),
+        "data_revision": snapshot.revision,
         "session_items_found": crawler.items_found,
         "last_run": crawler.last_run,
         "last_error": crawler.last_error,
@@ -191,7 +195,7 @@ def status():
         "login_state": login_state,
         "browser_ready": __import__("crawler").manager.is_ready,
         "progress": round(float(crawler.progress or 0), 3),
-        "browser_mode": __import__("crawler").get_settings().get("browser_mode", "silent"),
+        "browser_mode": get_settings().get("browser_mode", "silent"),
         "crawl_mode": "browser",
         "api_ready": [],
         "platform": ACTIVE_PLATFORM_KEY,
@@ -215,11 +219,21 @@ def api_config():
 @app.route("/api/prices")
 def prices():
     """全部真实商品，按型号归类（去重，非仅最低价）。"""
-    rows = db.distinct_items(platform=ACTIVE_PLATFORM_LABEL)
-    grouped = {"RTX 50 系": [], "RTX 40 系": [], "RTX 30 系": []}
-    for r in rows:
-        grouped.setdefault(r["series"], []).append(r)
-    return jsonify({"data": rows, "grouped": grouped})
+    snapshot = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL)
+    try:
+        client_revision = int(request.args.get("since", "-1"))
+    except (TypeError, ValueError):
+        client_revision = -1
+    if client_revision == snapshot.revision:
+        return jsonify({"unchanged": True, "revision": snapshot.revision})
+    rows = snapshot.rows
+    payload = {"data": rows, "revision": snapshot.revision}
+    if request.args.get("grouped") == "1":
+        grouped = {"RTX 50 系": [], "RTX 40 系": [], "RTX 30 系": []}
+        for row in rows:
+            grouped.setdefault(row["series"], []).append(row)
+        payload["grouped"] = grouped
+    return jsonify(payload)
 
 
 @app.route("/api/trend")
@@ -236,7 +250,8 @@ def trend():
 
 @app.route("/api/series_chart")
 def series_chart():
-    rel = charts.series_summary()
+    snapshot = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL)
+    rel = charts.series_summary(snapshot.rows, snapshot.revision)
     return jsonify({"chart": rel})
 
 
@@ -262,34 +277,11 @@ def recommend_api():
 @app.route("/api/stats")
 def stats():
     """统计指标：用【去重后的当前真实商品】计算（避免多轮采集重复计数）。"""
-    import statistics
-    rows = db.distinct_items(platform=ACTIVE_PLATFORM_LABEL)   # 闲鱼去重真实商品
-    prices = [r["price"] for r in rows if r.get("price")]
-    stats_info = {
-        "count": len(rows),
-        "real_count": len(rows),
-        "samples": len(prices),
-        "mean": round(statistics.mean(prices), 0) if prices else 0,
-        "median": round(statistics.median(prices), 0) if prices else 0,
-        "min": round(min(prices), 0) if prices else 0,
-        "max": round(max(prices), 0) if prices else 0,
-        "models_covered": len(set(r["model"] for r in rows)),
-        "models_total": len(__import__("gpus").get_all_models()),
-        "platform_dist": {},
-        "series_dist": {},
-    }
-    for r in rows:
-        stats_info["platform_dist"][r["platform"]] = stats_info["platform_dist"].get(r["platform"], 0) + 1
-        stats_info["series_dist"][r["series"]] = stats_info["series_dist"].get(r["series"], 0) + 1
-    per_model = {}
-    for r in rows:
-        per_model.setdefault(r["model"], []).append(r["price"])
-    stats_info["per_model"] = {
-        m: {"mean": round(statistics.mean(ps), 0), "median": round(statistics.median(ps), 0),
-            "min": round(min(ps), 0), "max": round(max(ps), 0), "count": len(ps)}
-        for m, ps in per_model.items()
-    }
-    stats_info["chart"] = charts.per_model_chart(stats_info)
+    snapshot = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL)
+    stats_info = dict(snapshot.stats)
+    stats_info["models_total"] = len(__import__("gpus").get_all_models())
+    stats_info["revision"] = snapshot.revision
+    stats_info["chart"] = charts.per_model_chart(stats_info, snapshot.revision)
     return jsonify(stats_info)
 
 
@@ -297,7 +289,7 @@ def stats():
 def export_csv():
     """导出全部真实价格数据为 CSV。"""
     import csv, io
-    items = db.distinct_items(platform=ACTIVE_PLATFORM_LABEL)
+    items = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL).rows
     def safe_cell(value):
         text = "" if value is None else str(value)
         return "'" + text if text.startswith(("=", "+", "-", "@")) else text
@@ -330,18 +322,23 @@ def clear_data():
 def crawl_log():
     """返回采集日志：实时任务日志 + 各型号统计。"""
     from gpus import get_all_models
+    models = get_all_models()
+    keys = {f"debug_{ACTIVE_PLATFORM_KEY}_{model['name'].replace(' ', '')}": ""
+            for model in models}
+    values = db.get_states({**keys, "last_run": ""})
+    last_run = values["last_run"]
     logs = []
-    for g in get_all_models():
-        gname = g["name"]
+    for model in models:
+        gname = model["name"]
         key = f"debug_{ACTIVE_PLATFORM_KEY}_{gname.replace(' ', '')}"
-        val = db.get_state(key)
+        val = values[key]
         if val:
             logs.append({"model": gname, "platform": ACTIVE_PLATFORM_LABEL, "info": val,
-                         "ts": db.get_state("last_run", "")})
+                         "ts": last_run})
     logs.sort(key=lambda x: (x["model"], x["platform"]))
     return jsonify({
         "logs": logs,
-        "task_log": getattr(crawler, "task_history", []),
+        "task_log": list(getattr(crawler, "task_history", [])),
         "current_task": getattr(crawler, "current_task", ""),
         "status": crawler.status,
         "progress": round(float(crawler.progress or 0), 3),
@@ -358,7 +355,6 @@ def history():
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def settings_api():
-    from crawler import get_settings, save_settings
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         try:
@@ -372,7 +368,7 @@ def settings_api():
 @app.route("/api/browser/mode", methods=["POST"])
 def browser_mode():
     """切换浏览器模式并重启：silent=静默无头 | visible=可视化(登录) | minimized=可视化+最小化(推荐)。"""
-    from crawler import manager, save_settings, get_settings
+    from crawler import manager
     data = request.get_json(silent=True) or {}
     mode = data.get("mode", "")
     if mode not in ("silent", "visible", "minimized"):
@@ -407,11 +403,7 @@ def models_api():
     )
     if request.method == "GET":
         models = get_all_models()
-        rows = db.distinct_items(platform=ACTIVE_PLATFORM_LABEL)
-        has_data = {}
-        for r in rows:
-            has_data.setdefault(r["model"], 0)
-            has_data[r["model"]] += 1
+        has_data = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL).model_counts
         for m in models:
             m["has_data"] = has_data.get(m["name"], 0)
         return jsonify({"ok": True, "models": models,
@@ -436,7 +428,6 @@ def models_api():
             return jsonify({"ok": False, "msg": "action 必须是 hide 或 restore"}), 400
         if ok and action == "hide":
             # 隐藏后从采集范围和关注列表移除，避免配置引用不可见型号。
-            from crawler import get_settings, save_settings
             cfg = get_settings()
             hidden_name = next((part.strip() for part in str(name).split(",") if part.strip()), str(name).strip())
             selected = [part.strip() for part in cfg["selected_models"].split(",") if part.strip()]

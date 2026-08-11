@@ -13,41 +13,33 @@
 import statistics
 from datetime import datetime
 
-import database as db
+import market_data
+from settings_store import get_settings
 
 
 def _get_watched_models():
     """从设置读取关注型号列表。"""
-    from crawler import get_settings
     cfg = get_settings()
     return {x.strip() for x in cfg.get("watched_models", "").split(",") if x.strip()}
 
 
-def _compute_recommendations(limit=5, min_discount=0.10, watched=None):
+def _compute_recommendations(limit=5, min_discount=0.10, watched=None, snapshot=None):
     """从全量真实数据计算今日最佳推荐，返回排序后的列表。
     watched: 关注型号集合，命中则评分加权（优先推送）。"""
-    rows = [r for r in db.all_prices(platform="闲鱼") if "演示" not in (r.get("title") or "")]
+    snapshot = snapshot or market_data.get_snapshot("闲鱼")
+    rows = snapshot.rows
     if not rows:
         return []
     watched = watched or set()
 
     # 每个型号的行情基准
-    prices_by_model = {}
-    for r in rows:
-        prices_by_model.setdefault(r["model"], []).append(r["price"])
-    stats_by_model = {}
-    for m, ps in prices_by_model.items():
-        stats_by_model[m] = {"median": statistics.median(ps), "count": len(ps)}
-
-    # 按 URL 去重，保留最新价格
-    by_url = {}
-    for r in rows:
-        u = r.get("url")
-        if not u:
-            continue
-        if u not in by_url or r["id"] > by_url[u]["id"]:
-            by_url[u] = r
-    items = list(by_url.values())
+    prices_by_model = snapshot.model_prices
+    stats_by_model = {
+        model: {"median": statistics.median(prices), "count": len(prices)}
+        for model, prices in prices_by_model.items()
+    }
+    # 当前价格表已在数据库层按 URL 去重；无链接商品不进入购买推荐。
+    items = (row for row in rows if row.get("url"))
 
     scored = []
     for r in items:
@@ -101,7 +93,8 @@ def _compute_recommendations(limit=5, min_discount=0.10, watched=None):
 def today_recommendations(limit=5):
     """今日最佳推荐（对外接口）。返回带推荐理由的列表，关注型号优先。"""
     watched = _get_watched_models()
-    recs = _compute_recommendations(limit=limit, watched=watched)
+    snapshot = market_data.get_snapshot("闲鱼")
+    recs = _compute_recommendations(limit=limit, watched=watched, snapshot=snapshot)
     # 附加推荐理由
     for i, r in enumerate(recs):
         reason = "比该型号市场参考价"
@@ -121,4 +114,5 @@ def today_recommendations(limit=5):
         r["rank"] = i + 1
         r["watched"] = r["model"] in watched
     return {"date": datetime.now().strftime("%Y-%m-%d"), "count": len(recs),
+            "revision": snapshot.revision,
             "watched": sorted(watched), "recommendations": recs}

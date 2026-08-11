@@ -2,6 +2,13 @@
 """RTX 30/40/50 系显卡型号清单与归类。"""
 
 import re
+import threading
+
+_COMPACT_RE = re.compile(r"[^a-z0-9]+")
+_RTX_MODEL_RE = re.compile(r"rtx(\d{4})")
+_RX_MODEL_RE = re.compile(r"rx(\d{4})")
+_MOBILE_SUFFIX_RE = re.compile(r"\d{3,4}\s?m\b")
+_ACCESSORY_ONLY_RE = re.compile(r"只出.{0,24}(散热器|风扇|背板|外壳|空盒|包装盒|支架)")
 
 # 每个型号：名称、系列代号(用于归类)、常用关键词(用于匹配商品标题)
 GPU_MODELS = [
@@ -62,7 +69,7 @@ def classify(name: str) -> dict:
     variant = _detect_5090_variant(normalized)
     if variant:
         return {"name": variant, "series": "RTX 50 系", "generation": 50}
-    matches = [g for g in GPU_MODELS if _compact(g["name"]) in normalized]
+    matches = [gpu for token, gpu in _MODEL_TOKEN_ROWS if token in normalized]
     if matches:
         g = max(matches, key=lambda item: len(_compact(item["name"])))
         return {"name": g["name"], "series": g["series"], "generation": g["generation"]}
@@ -71,7 +78,16 @@ def classify(name: str) -> dict:
 
 def _compact(value: str) -> str:
     """把型号文本规整为仅含字母数字的形式，兼容空格和连字符差异。"""
-    return re.sub(r"[^a-z0-9]+", "", (value or "").casefold())
+    return _COMPACT_RE.sub("", (value or "").casefold())
+
+
+_MODEL_BY_FOLDED_NAME = {gpu["name"].casefold(): gpu for gpu in GPU_MODELS}
+_MODEL_TOKEN_ROWS = tuple(
+    sorted(((_compact(gpu["name"]), gpu) for gpu in GPU_MODELS),
+           key=lambda row: len(row[0]), reverse=True)
+)
+_BUILTIN_NAMES = frozenset(gpu["name"] for gpu in GPU_MODELS)
+_BUILTIN_FOLDED_NAMES = frozenset(name.casefold() for name in _BUILTIN_NAMES)
 
 
 def _detect_5090_variant(compact_text: str):
@@ -101,7 +117,7 @@ def title_matches_model(title: str, model_name: str) -> bool:
     compact_title = _compact(title)
     if not compact_title:
         return False
-    target = next((g for g in GPU_MODELS if g["name"].casefold() == (model_name or "").casefold()), None)
+    target = _MODEL_BY_FOLDED_NAME.get((model_name or "").casefold())
     if not target:
         # 自定义型号不能“默认放行”，必须真的出现在商品标题中。
         custom = _compact(model_name)
@@ -112,8 +128,7 @@ def title_matches_model(title: str, model_name: str) -> bool:
 
     # 找出标题中所有内置型号，再移除被更具体变体包含的基础型号。
     candidates = []
-    for gpu in GPU_MODELS:
-        token = _compact(gpu["name"])
+    for token, gpu in _MODEL_TOKEN_ROWS:
         if token and token in compact_title:
             candidates.append((gpu, token))
     specific = []
@@ -150,7 +165,7 @@ def listing_rejection_reason(title: str):
     for marker in _NON_PRODUCT_PATTERNS:
         if marker in text:
             return f"非整卡商品：{marker}"
-    if re.search(r"只出.{0,24}(散热器|风扇|背板|外壳|空盒|包装盒|支架)", text):
+    if _ACCESSORY_ONLY_RE.search(text):
         return "非整卡商品：只出售配件"
     for marker in _BAIT_PATTERNS:
         if marker in text:
@@ -175,7 +190,7 @@ def is_desktop_gpu(title: str) -> bool:
     if not t:
         return True
     # 常见移动版后缀：型号数字后紧跟小写 m（如 4080m、4060 m）
-    if re.search(r"\d{3,4}\s?m\b", t):
+    if _MOBILE_SUFFIX_RE.search(t):
         return False
     for marker in MOBILE_MARKERS:
         if marker in t:
@@ -193,50 +208,77 @@ import database as _db
 
 CUSTOM_KEY = "custom_models"  # state 表键：存储 JSON 列表，如 ["RX 7900 XTX", "RTX 4090Ti"]
 HIDDEN_KEY = "hidden_builtin_models"  # 仅隐藏内置型号，不删除内置定义
+_model_config_lock = threading.Lock()
+_model_config_cache = {}
+_model_config_generation = 0
+
+
+def _load_model_config():
+    import json
+    while True:
+        identity = _db.DB_PATH
+        with _model_config_lock:
+            cached = _model_config_cache.get(identity)
+            if cached is not None:
+                return list(cached[0]), set(cached[1])
+            generation = _model_config_generation
+        raw = _db.get_states({CUSTOM_KEY: "[]", HIDDEN_KEY: "[]"})
+        try:
+            custom_values = json.loads(raw[CUSTOM_KEY])
+            custom = [value for value in custom_values if isinstance(value, str) and value.strip()]
+        except Exception:
+            custom = []
+        try:
+            hidden_values = json.loads(raw[HIDDEN_KEY])
+            hidden = {value for value in hidden_values
+                      if isinstance(value, str) and value in _BUILTIN_NAMES}
+        except Exception:
+            hidden = set()
+        with _model_config_lock:
+            if generation != _model_config_generation:
+                continue
+            _model_config_cache[identity] = (tuple(custom), frozenset(hidden))
+            return custom, hidden
+
+
+def _invalidate_model_config():
+    global _model_config_generation
+    with _model_config_lock:
+        _model_config_cache.pop(_db.DB_PATH, None)
+        _model_config_generation += 1
 
 
 def _load_custom():
-    import json
-    raw = _db.get_state(CUSTOM_KEY, "[]")
-    try:
-        val = json.loads(raw)
-        return [x for x in val if isinstance(x, str) and x.strip()]
-    except Exception:
-        return []
+    return _load_model_config()[0]
 
 
 def _save_custom(lst):
     import json
     _db.set_state(CUSTOM_KEY, json.dumps(lst, ensure_ascii=False))
+    _invalidate_model_config()
 
 
 def _load_hidden():
-    import json
-    raw = _db.get_state(HIDDEN_KEY, "[]")
-    try:
-        values = json.loads(raw)
-    except Exception:
-        return set()
-    builtin = {g["name"] for g in GPU_MODELS}
-    return {value for value in values if isinstance(value, str) and value in builtin}
+    return _load_model_config()[1]
 
 
 def _save_hidden(values):
     import json
-    valid = sorted(set(values) & {g["name"] for g in GPU_MODELS})
+    valid = sorted(set(values) & _BUILTIN_NAMES)
     _db.set_state(HIDDEN_KEY, json.dumps(valid, ensure_ascii=False))
+    _invalidate_model_config()
 
 
 def infer_model(name: str) -> dict:
     """根据型号名推断系列与代次（无法识别则归为"其他"）。"""
     clean = (name or "").strip()
     compact = _compact(clean)
-    rtx = re.search(r"rtx(\d{4})", compact)
+    rtx = _RTX_MODEL_RE.search(compact)
     if rtx:
         generation = int(rtx.group(1)[:2])
         if generation in (30, 40, 50):
             return {"name": clean, "series": f"RTX {generation} 系", "generation": generation}
-    rx = re.search(r"rx(\d{4})", compact)
+    rx = _RX_MODEL_RE.search(compact)
     if rx:
         family = int(rx.group(1)[0]) * 1000
         return {"name": clean, "series": f"RX {family} 系", "generation": family // 100}
@@ -267,7 +309,8 @@ def get_hidden_builtin_models():
 
 def hide_builtin_model(name: str):
     name = (name or "").strip()
-    match = next((g["name"] for g in GPU_MODELS if g["name"].casefold() == name.casefold()), None)
+    gpu = _MODEL_BY_FOLDED_NAME.get(name.casefold())
+    match = gpu["name"] if gpu else None
     if not match:
         return False, "只能隐藏内置型号"
     hidden = _load_hidden()
@@ -300,8 +343,7 @@ def add_custom_model(name: str):
     folded = name.casefold()
     if any(existing.casefold() == folded for existing in custom):
         return False, "型号已存在"
-    builtin_names = {g["name"].casefold() for g in GPU_MODELS}
-    if folded in builtin_names:
+    if folded in _BUILTIN_FOLDED_NAMES:
         return False, "该型号已在内置列表中"
     custom.append(name)
     _save_custom(custom)

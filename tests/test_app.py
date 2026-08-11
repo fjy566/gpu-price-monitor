@@ -78,6 +78,14 @@ class AppTests(unittest.TestCase):
         response = self.client.get("/api/status")
         self.assertEqual(["goofish"], [item["platform"] for item in response.get_json()["login_state"]])
 
+    def test_prices_revision_avoids_resending_unchanged_catalog(self):
+        db.add_price("RTX 5090", "RTX 50 系", 50, "闲鱼", "商品", 15000, "https://item")
+        first = self.client.get("/api/prices").get_json()
+        self.assertEqual(1, len(first["data"]))
+        second = self.client.get(f"/api/prices?since={first['revision']}").get_json()
+        self.assertTrue(second["unchanged"])
+        self.assertNotIn("data", second)
+
     def test_price_views_hide_legacy_platform_rows(self):
         db.add_price("RTX 5080", "RTX 50 系", 50, "京东", "旧平台商品", 8000, "https://jd.example")
         db.add_price("RTX 5080", "RTX 50 系", 50, "闲鱼", "闲鱼商品", 8200, "https://goofish.example")
