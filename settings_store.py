@@ -96,6 +96,12 @@ def save_settings(data):
             parts = [part.strip() for part in str(raw_value or "").split(",") if part.strip()]
             if any(len(part) > 40 or any(ch in part for ch in "\r\n\x00") for part in parts):
                 raise ValueError("型号设置包含无效值")
+            if key in {"selected_models", "watched_models"} and parts:
+                from gpus import get_all_models
+                known = {model["name"] for model in get_all_models()}
+                unknown = [part for part in parts if part not in known]
+                if unknown:
+                    raise ValueError(f"型号不存在或已隐藏：{unknown[0]}")
             value = ",".join(dict.fromkeys(parts))
         normalized[key] = value
     db.set_states(normalized, prefix="cfg_")

@@ -4,11 +4,12 @@ import io
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import api_panel
 import app as app_module
 import database as db
+import crawler as crawler_module
 
 
 class AppTests(unittest.TestCase):
@@ -54,6 +55,16 @@ class AppTests(unittest.TestCase):
         self.assertEqual(403, response.status_code)
         self.assertFalse(response.get_json()["ok"])
 
+    def test_remote_client_is_rejected_by_default(self):
+        response = self.client.get("/api/status", environ_base={"REMOTE_ADDR": "192.0.2.10"})
+        self.assertEqual(403, response.status_code)
+
+    def test_api_responses_disable_caching_and_clickjacking(self):
+        response = self.client.get("/api/status")
+        self.assertEqual("no-store", response.headers["Cache-Control"])
+        self.assertEqual("DENY", response.headers["X-Frame-Options"])
+        self.assertIn("object-src 'none'", response.headers["Content-Security-Policy"])
+
     def test_clear_removes_prices_and_history(self):
         db.add_price("RTX 5080", "RTX 50 系", 50, "闲鱼", "商品", 8000, "https://a")
         response = self.client.post("/api/clear")
@@ -76,7 +87,35 @@ class AppTests(unittest.TestCase):
 
     def test_status_exposes_only_goofish(self):
         response = self.client.get("/api/status")
-        self.assertEqual(["goofish"], [item["platform"] for item in response.get_json()["login_state"]])
+        payload = response.get_json()
+        self.assertEqual(["goofish"], [item["platform"] for item in payload["login_state"]])
+        self.assertIn("readiness", payload)
+        self.assertIn("run_summary", payload)
+
+    def test_invalid_or_hidden_model_cannot_be_saved(self):
+        response = self.client.post("/api/settings", json={"selected_models": "RTX 9999"})
+        self.assertEqual(400, response.status_code)
+        self.assertIn("型号不存在", response.get_json()["msg"])
+
+    def test_history_rejects_control_characters(self):
+        response = self.client.get("/api/history?model=RTX%205090%0Aother")
+        self.assertEqual(400, response.status_code)
+
+    def test_browser_mode_change_does_not_start_an_idle_browser(self):
+        with (
+            patch.object(type(crawler_module.manager), "is_ready", new_callable=PropertyMock, return_value=False),
+            patch.object(crawler_module.manager, "reboot") as reboot,
+        ):
+            response = self.client.post("/api/browser/mode", json={"mode": "visible"})
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.get_json()["restarting"])
+        reboot.assert_not_called()
+
+    def test_debug_tools_are_disabled_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GPU_MONITOR_DEBUG_TOOLS", None)
+            response = self.client.post("/api/debug/fetch", json={"keyword": "RTX5090"})
+        self.assertEqual(404, response.status_code)
 
     def test_prices_revision_avoids_resending_unchanged_catalog(self):
         db.add_price("RTX 5090", "RTX 50 系", 50, "闲鱼", "商品", 15000, "https://item")

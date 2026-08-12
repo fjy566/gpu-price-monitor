@@ -2,6 +2,7 @@
 """按数据库版本缓存行情快照，统一提供价格、统计和型号索引。"""
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 import statistics
 import threading
 
@@ -29,6 +30,7 @@ def _build_snapshot(platform, revision):
     model_prices = defaultdict(list)
     platform_dist = Counter()
     series_dist = Counter()
+    timestamps = []
     for row in rows:
         price = row.get("price")
         if price:
@@ -37,6 +39,10 @@ def _build_snapshot(platform, revision):
             model_prices[row["model"]].append(numeric_price)
         platform_dist[row["platform"]] += 1
         series_dist[row["series"]] += 1
+        try:
+            timestamps.append(datetime.fromisoformat(str(row.get("ts") or "")))
+        except (TypeError, ValueError):
+            pass
 
     frozen_model_prices = {model: tuple(values) for model, values in model_prices.items()}
     per_model = {
@@ -49,6 +55,10 @@ def _build_snapshot(platform, revision):
         }
         for model, values in frozen_model_prices.items()
     }
+    today = date.today()
+    freshness_cutoff = today - timedelta(days=6)
+    today_count = sum(value.date() == today for value in timestamps)
+    fresh_7d_count = sum(value.date() >= freshness_cutoff for value in timestamps)
     stats = {
         "count": len(rows),
         "real_count": len(rows),
@@ -61,6 +71,10 @@ def _build_snapshot(platform, revision):
         "platform_dist": dict(platform_dist),
         "series_dist": dict(series_dist),
         "per_model": per_model,
+        "latest_update": max(timestamps).isoformat(sep=" ", timespec="seconds") if timestamps else "",
+        "today_count": today_count,
+        "fresh_7d_count": fresh_7d_count,
+        "stale_count": max(0, len(rows) - fresh_7d_count),
     }
     return MarketSnapshot(
         database_path=db.DB_PATH,

@@ -28,6 +28,14 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertNotIn("pdd", script)
         self.assertNotIn("cfg-crawl_mode", html)
 
+    def test_humanized_workflow_controls_are_present(self):
+        html = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for element_id in ("readiness-strip", "run-summary", "btn-retry-failed", "filter-freshness", "browser-mode-select"):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("await Promise.all([persistScope(false), saveThresholds(false)])", script)
+        self.assertNotIn("cfg-keep_min", html)
+
 
 if __name__ == "__main__":
     unittest.main()

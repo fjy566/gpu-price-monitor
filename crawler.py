@@ -23,9 +23,7 @@ import os
 import math
 import random
 import re
-import subprocess
 import threading
-import time
 import traceback
 from collections import deque
 from datetime import datetime
@@ -35,7 +33,7 @@ from queue import Queue
 from playwright.sync_api import sync_playwright
 
 import database as db
-from settings_store import DEFAULT_SETTINGS, get_settings, save_settings
+from settings_store import get_settings
 from listing_pipeline import FilterPolicy, ListingFilter
 
 # 限速参数（秒）
@@ -131,15 +129,16 @@ class GoofishCrawler(PlatformCrawler):
             body = page.inner_text("body")
             # 已登录：出现"我的/发布/消息/退出"等用户功能词；未登录通常有明显的"登录/注册"入口
             logged_markers = ["退出", "我的", "发布", "消息"]
-            login_markers = ["立即登录", "注册", "请登录"]
             logged_in = any(m in body for m in logged_markers) and "立即登录" not in body
             return logged_in
         except Exception:
             return False
         finally:
             if page:
-                try: page.close()
-                except Exception: pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def fetch(self, context, kw, on_batch=None):
         page = context.new_page()
@@ -243,8 +242,10 @@ class GoofishCrawler(PlatformCrawler):
                                         next_box = box
                                         break
                                 if next_box:
-                                    try: next_box.scroll_into_view_if_needed()
-                                    except Exception: pass
+                                    try:
+                                        next_box.scroll_into_view_if_needed()
+                                    except Exception:
+                                        pass
                                     try:
                                         next_box.click(force=True)
                                         page.wait_for_timeout(3000)
@@ -255,8 +256,10 @@ class GoofishCrawler(PlatformCrawler):
                                 pass
                             # 方法B：底部箭头
                             if not advanced and next_btn:
-                                try: next_btn.scroll_into_view_if_needed()
-                                except Exception: pass
+                                try:
+                                    next_btn.scroll_into_view_if_needed()
+                                except Exception:
+                                    pass
                                 try:
                                     next_btn.click(force=True)
                                     page.wait_for_timeout(3000)
@@ -301,8 +304,10 @@ class JDCrawler(PlatformCrawler):
             return False
         finally:
             if page:
-                try: page.close()
-                except Exception: pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def fetch(self, context, kw, on_batch=None):
         page = context.new_page()
@@ -357,8 +362,10 @@ class TaobaoCrawler(PlatformCrawler):
             return False
         finally:
             if page:
-                try: page.close()
-                except Exception: pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def fetch(self, context, kw, on_batch=None):
         page = context.new_page()
@@ -407,8 +414,10 @@ class PDDCrawler(PlatformCrawler):
             return False
         finally:
             if page:
-                try: page.close()
-                except Exception: pass
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def fetch(self, context, kw, on_batch=None):
         page = context.new_page()
@@ -600,13 +609,16 @@ def _collect(page, card_sels, title_sels, price_sels, link_sels, base, limit=30)
             title_el = price_el = link_el = None
             for s in title_sels:
                 if card.query_selector(s):
-                    title_el = card.query_selector(s); break
+                    title_el = card.query_selector(s)
+                    break
             for s in price_sels:
                 if card.query_selector(s):
-                    price_el = card.query_selector(s); break
+                    price_el = card.query_selector(s)
+                    break
             for s in link_sels:
                 if card.query_selector(s):
-                    link_el = card.query_selector(s); break
+                    link_el = card.query_selector(s)
+                    break
             if not (title_el and price_el):
                 continue
             t = title_el.inner_text().strip()
@@ -744,8 +756,10 @@ class BrowserManager:
         html = pg.content()
         with open(save_path, "w", encoding="utf-8") as f:
             f.write(html)
-        try: pg.close()
-        except Exception: pass
+        try:
+            pg.close()
+        except Exception:
+            pass
         return True, {"saved": save_path, "len": len(html)}
 
     def _debug_fetch_impl(self, pc, kw):
@@ -753,8 +767,10 @@ class BrowserManager:
         pg.goto(f"https://www.goofish.com/search?q={quote_plus(kw)}", timeout=45000)
         pg.wait_for_timeout(6000)
         try:
-            pg.mouse.wheel(0, 800); pg.wait_for_timeout(1500)
-        except Exception: pass
+            pg.mouse.wheel(0, 800)
+            pg.wait_for_timeout(1500)
+        except Exception:
+            pass
         cards = pg.query_selector_all(_GOOFISH_CARD_SELECTOR)
         info = {"cards": len(cards), "samples": []}
         for card in cards[:4]:
@@ -769,8 +785,10 @@ class BrowserManager:
                 })
             except Exception as e:
                 info["samples"].append({"err": str(e)[:60]})
-        try: pg.close()
-        except Exception: pass
+        try:
+            pg.close()
+        except Exception:
+            pass
         return True, info
 
     def debug_fetch(self, pc, kw):
@@ -799,7 +817,6 @@ class BrowserManager:
         try:
             for i in range(max_pages):
                 cards = page.query_selector_all(_GOOFISH_CARD_SELECTOR)
-                before = len(seen)
                 for card in cards:
                     try:
                         h = card.get_attribute("href") or ""
@@ -835,14 +852,6 @@ class BrowserManager:
                         break
                 except Exception:
                     pass
-                # 直接点页码“下一页”更可靠：点第2页，或“下一页”页码按钮
-                page_target = None
-                try:
-                    # 点“下一页”页数字（当前页+1），或底部箭头
-                    # 用底部唯一箭头 next_btn (真实点击)
-                    page_target = next_btn
-                except Exception:
-                    pass
                 try:
                     # 方法A：点页码“下一页”（找当前页+1 的数字框）—— 比箭头更可靠
                     advanced = False
@@ -865,8 +874,10 @@ class BrowserManager:
                                 next_box = box
                                 break
                         if next_box:
-                            try: next_box.scroll_into_view_if_needed()
-                            except Exception: pass
+                            try:
+                                next_box.scroll_into_view_if_needed()
+                            except Exception:
+                                pass
                             try:
                                 next_box.click(force=True)
                                 page.wait_for_timeout(3500)
@@ -919,8 +930,10 @@ class BrowserManager:
             info["err"] = str(e)[:120]
         info["total_unique"] = len(seen)
         info["pages_reached"] = page_progress
-        try: page.close()
-        except Exception: pass
+        try:
+            page.close()
+        except Exception:
+            pass
         return True, info
 
     def _close_impl(self):
@@ -1046,11 +1059,40 @@ class Crawler:
         self.current_task = ""      # 当前正在采集的任务描述（用于日志）
         self.task_history = deque(maxlen=100)  # O(1) 追加并自动淘汰旧日志
         self._last_transport_note = ""
+        self._model_override = None
+        self.run_summary = {
+            "total": 0, "completed": 0, "succeeded": 0, "failed": 0,
+            "stored": 0, "failed_models": [],
+        }
+
+    def restore_persisted_state(self):
+        """数据库初始化后恢复跨进程有意义的只读运行指标。"""
+        values = db.get_states({"rounds": "0", "last_run": ""})
+        try:
+            self.rounds = max(0, int(values.get("rounds") or 0))
+        except (TypeError, ValueError):
+            self.rounds = 0
+        self.last_run = str(values.get("last_run") or "")
 
     # ---- 控制接口 ----
-    def start(self):
+    def start(self, models=None):
         with self._state_lock:
             if self._running or (self._thread and self._thread.is_alive()):
+                self.last_error = "已有采集任务正在运行"
+                return False
+            from gpus import get_all_models
+            available = {model["name"] for model in get_all_models()}
+            if models is None:
+                configured = {
+                    value.strip() for value in get_settings()["selected_models"].split(",")
+                    if value.strip()
+                }
+                targets = configured or available
+            else:
+                targets = {str(value).strip() for value in models if str(value).strip()}
+            targets &= available
+            if not targets:
+                self.last_error = "没有可采集型号，请先选择并保存至少一个型号"
                 return False
             self._running = True
             self._stop_event.clear()
@@ -1059,6 +1101,11 @@ class Crawler:
             self.last_error = ""
             self.items_found = 0
             self._last_transport_note = ""
+            self._model_override = frozenset(targets)
+            self.run_summary = {
+                "total": len(targets), "completed": 0, "succeeded": 0, "failed": 0,
+                "stored": 0, "failed_models": [],
+            }
             db.set_states({"last_error": "", "session_items_found": "0"})
             try:
                 from gpus import get_all_models
@@ -1076,18 +1123,31 @@ class Crawler:
             self._thread.start()
         return True
 
+    def retry_failed(self):
+        """只重试上一轮没有入库数据的型号。"""
+        failed = [item.get("model", "") for item in self.run_summary.get("failed_models", [])]
+        failed = [name for name in failed if name]
+        if not failed:
+            self.last_error = "上一轮没有需要重试的失败型号"
+            return False
+        return self.start(failed)
+
     def pause(self):
-        if self._running and self.status == "running":
-            self._pause_event.clear()
-            self.status = "paused"
-            return True
+        with self._state_lock:
+            if self._running and self.status == "running":
+                self._pause_event.clear()
+                self.status = "paused"
+                self._log("采集将在当前页面批次完成后暂停", "warn")
+                return True
         return False
 
     def resume(self):
-        if self._running and self.status == "paused":
-            self._pause_event.set()
-            self.status = "running"
-            return True
+        with self._state_lock:
+            if self._running and self.status == "paused":
+                self._pause_event.set()
+                self.status = "running"
+                self._log("采集已继续", "info")
+                return True
         return False
 
     def stop(self):
@@ -1139,6 +1199,7 @@ class Crawler:
                 self._log(f"浏览器自动退出失败：{exc}", "warn")
             with self._state_lock:
                 self._running = False
+                self._model_override = None
                 if self._thread is threading.current_thread():
                     self._thread = None
             self.current_task = ""
@@ -1151,11 +1212,13 @@ class Crawler:
         self.task_history.append(entry)
 
     def _one_round(self):
-        from gpus import get_all_models, infer_model
+        from gpus import get_all_models
         all_models = get_all_models()
         cfg = get_settings()
         sel_platforms = set(ACTIVE_PLATFORM_NAMES)
-        sel_models = {x.strip() for x in cfg["selected_models"].split(",") if x.strip()}
+        sel_models = set(self._model_override or ())
+        if not sel_models:
+            sel_models = {x.strip() for x in cfg["selected_models"].split(",") if x.strip()}
         # 计算本轮任务量，用于进度条
         tasks = 0
         for pc in self.platforms:
@@ -1185,9 +1248,20 @@ class Crawler:
                 self._log(self.current_task)
                 db.set_state("current_task", self.current_task)
                 try:
-                    self._fetch_model(pc, model, cfg)
+                    outcome = self._fetch_model(pc, model, cfg)
                 except Exception as e:
                     db.set_state("last_error", f"{pc.name}: {e}")
+                    outcome = {"model": model["name"], "stored": 0, "reason": str(e)}
+                self.run_summary["completed"] += 1
+                self.run_summary["stored"] += int(outcome.get("stored", 0) or 0)
+                if outcome.get("stored", 0):
+                    self.run_summary["succeeded"] += 1
+                else:
+                    self.run_summary["failed"] += 1
+                    self.run_summary["failed_models"].append({
+                        "model": model["name"],
+                        "reason": outcome.get("reason") or "未采集到有效商品",
+                    })
                 self._round_done += 1
                 self.progress = min(1.0, self._round_done / self._round_total)
         self.progress = 1.0
@@ -1264,6 +1338,10 @@ class Crawler:
 
     def _stream_store_batch(self, pc, model, batch, streamed_urls, policy=None):
         """整轮完成前逐页过滤并入库，让前端实时看到新商品。"""
+        if not self._running:
+            return False
+        # 页面级回调是长任务内的安全暂停点；停止时由 stop() 唤醒并返回 False。
+        self._pause_event.wait()
         if not self._running:
             return False
         kept, _ = self._filter_items(model, batch, policy)
@@ -1360,8 +1438,13 @@ class Crawler:
                          f"未采集到数据 mode={mode} reason={reason}")
             self._log(f"{_PLATFORM_LABEL[pc.name]} {model['name']} 无数据：{reason}", "warn")
         self._stop_event.wait(random.uniform(MIN_DELAY, MAX_DELAY))
+        return {
+            "model": model["name"],
+            "stored": len(streamed_urls),
+            "raw": len(items),
+            "reason": "" if streamed_urls else (self._last_transport_note or "未返回商品"),
+        }
 
 
-from gpus import GPU_MODELS as _MODELS  # noqa: E402
 
 crawler = Crawler(headless=True)   # 采集循环控制；浏览器 headless 由 manager/BrowserManager 决定

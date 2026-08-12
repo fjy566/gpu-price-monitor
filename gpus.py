@@ -204,7 +204,7 @@ def is_desktop_gpu(title: str) -> bool:
 # ======================================================================
 # 用户自定义型号：存于全局配置（state 表），与内置型号合并使用
 # ======================================================================
-import database as _db
+import database as _db  # noqa: E402
 
 CUSTOM_KEY = "custom_models"  # state 表键：存储 JSON 列表，如 ["RX 7900 XTX", "RTX 4090Ti"]
 HIDDEN_KEY = "hidden_builtin_models"  # 仅隐藏内置型号，不删除内置定义

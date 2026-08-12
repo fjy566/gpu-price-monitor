@@ -8,5 +8,8 @@
 *.db-wal
 *.log
 
+# Generated from local market data; rebuild on demand and never publish it.
+static/charts/*.png
+
 __pycache__/
 ui_preview.png

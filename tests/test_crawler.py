@@ -6,6 +6,7 @@ from unittest.mock import PropertyMock, patch
 
 import crawler
 import database as db
+from settings_store import DEFAULT_SETTINGS, save_settings
 
 
 class CrawlerTests(unittest.TestCase):
@@ -66,7 +67,29 @@ class CrawlerTests(unittest.TestCase):
         ):
             with self.subTest(payload=payload):
                 with self.assertRaises(ValueError):
-                    crawler.save_settings(payload)
+                    save_settings(payload)
+
+    def test_persisted_rounds_and_last_run_are_restored(self):
+        db.set_states({"rounds": "7", "last_run": "2026-08-12 12:30:00"})
+        worker = crawler.Crawler()
+        worker.restore_persisted_state()
+        self.assertEqual(7, worker.rounds)
+        self.assertEqual("2026-08-12 12:30:00", worker.last_run)
+
+    def test_retry_failed_targets_only_failed_models(self):
+        worker = crawler.Crawler()
+        worker.run_summary = {
+            "total": 2, "completed": 2, "succeeded": 1, "failed": 1,
+            "stored": 4, "failed_models": [{"model": "RTX 5080", "reason": "超时"}],
+        }
+        with patch.object(worker, "start", return_value=True) as start:
+            self.assertTrue(worker.retry_failed())
+        start.assert_called_once_with(["RTX 5080"])
+
+    def test_retry_failed_explains_when_there_is_nothing_to_retry(self):
+        worker = crawler.Crawler()
+        self.assertFalse(worker.retry_failed())
+        self.assertIn("没有需要重试", worker.last_error)
 
     def test_pause_and_resume_do_not_create_a_fake_running_state(self):
         worker = crawler.Crawler()
@@ -140,7 +163,7 @@ class CrawlerTests(unittest.TestCase):
         worker._running = True
         worker._pause_event.set()
         model = {"name": "RX 7900 XTX", "series": "RX 7000 系", "generation": 70}
-        settings = dict(crawler.DEFAULT_SETTINGS)
+        settings = dict(DEFAULT_SETTINGS)
         settings.update({"crawl_mode": "http", "abs_min": "500"})
         pc = next(p for p in worker.platforms if p.name == "jd")
         with (

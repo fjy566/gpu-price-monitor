@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Flask 入口：统一 Web 控制台。"""
 import os
+import ipaddress
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, render_template, request
@@ -15,6 +16,7 @@ from gpus import (PLATFORM_API_DOC, detect_5090_variant, is_desktop_gpu,
 
 app = Flask(__name__)
 db.init_db()
+crawler.restore_persisted_state()
 db.reclassify_5090_rows(detect_5090_variant)
 _startup_settings = get_settings()
 db.purge_legacy_noise(
@@ -28,7 +30,17 @@ ACTIVE_PLATFORM_KEYS = frozenset(ACTIVE_PLATFORM_NAMES)
 
 @app.before_request
 def protect_local_mutations():
-    """拒绝来自其它网页 Origin 的本地写操作，降低 localhost CSRF 风险。"""
+    """默认只允许本机访问；写操作另外校验浏览器 Origin。"""
+    allow_remote = os.environ.get("GPU_MONITOR_ALLOW_REMOTE", "").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+    if not allow_remote:
+        try:
+            client = ipaddress.ip_address(request.remote_addr or "")
+        except ValueError:
+            client = None
+        if client is None or not client.is_loopback:
+            return jsonify({"ok": False, "msg": "此服务默认仅允许本机访问"}), 403
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
         return None
     origin = request.headers.get("Origin")
@@ -48,8 +60,13 @@ def add_security_headers(response):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; img-src 'self' data:; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; "
+        "object-src 'none'; base-uri 'self'; form-action 'self'",
     )
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 
@@ -147,7 +164,18 @@ def control_start_crawl():
     ok = crawler.start()
     return jsonify({"ok": ok, "status": crawler.status, "mode": "browser",
                     "platform": ACTIVE_PLATFORM_KEY,
-                    "msg": "正在启动浏览器并采集" if ok else "已有采集任务正在运行"}), (200 if ok else 409)
+                    "msg": "正在启动浏览器并采集" if ok else (crawler.last_error or "无法开始采集")}), (200 if ok else 409)
+
+
+@app.route("/api/control/retry_failed", methods=["POST"])
+def control_retry_failed():
+    """只重试上一轮未入库有效商品的型号。"""
+    ok = crawler.retry_failed()
+    return jsonify({
+        "ok": ok,
+        "status": crawler.status,
+        "msg": "正在重试上一轮失败型号" if ok else (crawler.last_error or "没有可重试型号"),
+    }), (200 if ok else 409)
 
 
 @app.route("/api/control/pause", methods=["POST"])
@@ -183,6 +211,15 @@ def status():
             continue
         login_state.append({"platform": pc.name, "logged_in": pc.logged_in,
                             "label": pc.label})
+    from gpus import get_all_models
+    available_models = get_all_models()
+    available_names = {model["name"] for model in available_models}
+    configured_models = {
+        name.strip() for name in get_settings().get("selected_models", "").split(",")
+        if name.strip()
+    }
+    selected_count = len(configured_models & available_names) if configured_models else len(available_models)
+    login_confirmed = any(item["logged_in"] for item in login_state)
     return jsonify({
         "status": crawler.status,
         "rounds": crawler.rounds,
@@ -200,6 +237,13 @@ def status():
         "api_ready": [],
         "platform": ACTIVE_PLATFORM_KEY,
         "platform_label": ACTIVE_PLATFORM_LABEL,
+        "run_summary": dict(crawler.run_summary),
+        "readiness": {
+            "selected_models": selected_count,
+            "login_confirmed": login_confirmed,
+            "has_data": bool(snapshot.rows),
+            "can_start": selected_count > 0,
+        },
     })
 
 
@@ -288,7 +332,8 @@ def stats():
 @app.route("/api/export")
 def export_csv():
     """导出全部真实价格数据为 CSV。"""
-    import csv, io
+    import csv
+    import io
     items = market_data.get_snapshot(ACTIVE_PLATFORM_LABEL).rows
     def safe_cell(value):
         text = "" if value is None else str(value)
@@ -348,7 +393,9 @@ def crawl_log():
 
 @app.route("/api/history")
 def history():
-    model = request.args.get("model", "")
+    model = request.args.get("model", "").strip()
+    if not model or len(model) > 40 or any(ch in model for ch in "\r\n\x00"):
+        return jsonify({"ok": False, "msg": "请选择有效型号"}), 400
     rows = db.history(model, ACTIVE_PLATFORM_LABEL)
     return jsonify({"data": rows})
 
@@ -373,10 +420,17 @@ def browser_mode():
     mode = data.get("mode", "")
     if mode not in ("silent", "visible", "minimized"):
         return jsonify({"ok": False, "msg": "模式必须是 silent / visible / minimized"}), 400
-    was_running = crawler.status == "running"
-    if was_running:
-        crawler.pause()
+    if crawler.status in {"running", "paused"}:
+        return jsonify({"ok": False, "msg": "请先停止当前采集，再切换浏览器模式"}), 409
     save_settings({"browser_mode": mode})
+    label = {"silent": "静默", "visible": "可视化", "minimized": "最小化"}[mode]
+    if not manager.is_ready:
+        return jsonify({
+            "ok": True,
+            "msg": f"已保存为{label}模式，下次启动浏览器时生效",
+            "mode": mode,
+            "restarting": False,
+        })
     headless = (mode == "silent")
     minimized = (mode == "minimized")
     import threading
@@ -385,13 +439,11 @@ def browser_mode():
             ok, res = manager.reboot(headless, minimized)
             if not ok:
                 crawler.last_error = str(res.get("msg", ""))
-            elif was_running:
-                crawler.resume()
         except Exception as e:
             crawler.last_error = str(e)
     threading.Thread(target=_reboot, daemon=True).start()
-    label = {"silent": "静默", "visible": "可视化", "minimized": "最小化"}[mode]
-    return jsonify({"ok": True, "msg": f"浏览器已切换为{label}模式", "mode": mode})
+    return jsonify({"ok": True, "msg": f"正在切换为{label}模式", "mode": mode,
+                    "restarting": True})
 
 
 @app.route("/api/models", methods=["GET", "POST", "DELETE", "PATCH"])
@@ -441,11 +493,15 @@ def models_api():
 @app.route("/api/debug/paginate", methods=["POST"])
 def debug_paginate():
     """诊断接口：跑一遍闲鱼翻页，返回抓到多少卡片（验证翻页效果）。"""
+    if os.environ.get("GPU_MONITOR_DEBUG_TOOLS", "") != "1":
+        return jsonify({"ok": False, "msg": "诊断工具未启用"}), 404
     from crawler import manager
     if not manager.is_ready:
         return jsonify({"ok": False, "msg": "浏览器未启动"}), 400
     data = request.get_json(silent=True) or {}
-    kw = data.get("kw", "RTX5080")
+    kw = str(data.get("kw", "RTX5080")).strip()[:80]
+    if not kw or any(ch in kw for ch in "\r\n\x00"):
+        return jsonify({"ok": False, "msg": "关键词无效"}), 400
     ok, res = manager.debug_paginate(kw)
     return jsonify({"ok": ok, "result": res})
 
@@ -453,12 +509,14 @@ def debug_paginate():
 @app.route("/api/debug/fetch", methods=["POST"])
 def debug_fetch():
     """诊断接口：返回闲鱼搜索页少量商品卡片样本，不写入价格库。"""
+    if os.environ.get("GPU_MONITOR_DEBUG_TOOLS", "") != "1":
+        return jsonify({"ok": False, "msg": "诊断工具未启用"}), 404
     from crawler import GoofishCrawler, manager
     if not manager.is_ready:
         return jsonify({"ok": False, "msg": "浏览器未启动"}), 400
     data = request.get_json(silent=True) or {}
     kw = str(data.get("kw", "RTX 5090")).strip()[:80]
-    if not kw:
+    if not kw or any(ch in kw for ch in "\r\n\x00"):
         return jsonify({"ok": False, "msg": "关键词不能为空"}), 400
     ok, res = manager.debug_fetch(GoofishCrawler(), kw)
     return jsonify({"ok": ok, "result": res})

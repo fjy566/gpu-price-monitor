@@ -139,6 +139,47 @@ function refreshStatusUI() {
   dot.style.animation = status === "running" ? "pulse 1.4s infinite" : "none";
   label.textContent = text;
   refreshLogin();
+  renderReadiness(currentStatus.readiness || {});
+  renderRunSummary(currentStatus.run_summary || {});
+}
+
+function renderReadiness(readiness) {
+  const selected = allModels.length ? selectedModels.size : (Number(readiness.selected_models) || 0);
+  const items = allData.length || Number(currentStatus.items_found) || 0;
+  const steps = [
+    ["ready-models", selected > 0, selected > 0 ? `已选择 ${selected} 个型号` : "请至少选择一个型号"],
+    ["ready-login", Boolean(readiness.login_confirmed), readiness.login_confirmed ? "登录状态已确认" : "首次使用请扫码登录"],
+    ["ready-data", items > 0, items > 0 ? `已有 ${items} 条商品` : "开始一次采集"],
+  ];
+  for (const [id, done, copy] of steps) {
+    const item = $(id);
+    item.classList.toggle("done", done);
+    item.querySelector("small").textContent = copy;
+  }
+  const readyToStart = selected > 0;
+  $("readiness-strip").classList.toggle("is-ready", readyToStart && readiness.login_confirmed);
+  $("readiness-summary").textContent = !readyToStart
+    ? "先选择采集型号"
+    : readiness.login_confirmed
+      ? "配置已就绪，可以开始采集"
+      : "可以直接开始；若登录失效，浏览器会显示登录页";
+}
+
+function renderRunSummary(summary) {
+  const total = Number(summary.total) || 0;
+  const box = $("run-summary");
+  box.hidden = total === 0;
+  if (!total) return;
+  const completed = Number(summary.completed) || 0;
+  const succeeded = Number(summary.succeeded) || 0;
+  const failed = Number(summary.failed) || 0;
+  const stored = Number(summary.stored) || 0;
+  const active = ["running", "paused"].includes(currentStatus.status);
+  $("run-summary-title").textContent = active ? `正在处理 ${completed}/${total} 个型号` : `本轮完成 ${completed}/${total} 个型号`;
+  const failedNames = (summary.failed_models || []).map((item) => item.model).filter(Boolean);
+  $("run-summary-detail").textContent = `有数据 ${succeeded} · 无有效数据 ${failed} · 有效商品 ${stored} 条${failedNames.length ? ` · 待重试：${failedNames.join("、")}` : ""}`;
+  const retry = $("btn-retry-failed");
+  retry.hidden = active || failedNames.length === 0;
 }
 
 function refreshLogin() {
@@ -166,6 +207,8 @@ function refreshLogin() {
   $("browserState").textContent = currentStatus.browser_ready ? "浏览器已启动" : "浏览器未启动";
   const mode = currentStatus.browser_mode || settingsCache.browser_mode || "minimized";
   $("browser-mode-label").textContent = mode === "visible" ? "可视化" : mode === "silent" ? "静默无头" : "最小化";
+  const modeSelect = $("browser-mode-select");
+  if (document.activeElement !== modeSelect) modeSelect.value = mode;
 }
 
 function openLoginModal(title, hint, imageSource) {
@@ -207,8 +250,21 @@ function closeModal() {
 async function doBoot() {
   toast("正在启动项目专用浏览器…");
   const result = await api("/api/control/start", "POST");
-  toast(result.msg || "启动请求已提交", "success");
+  toast(result.msg || "浏览器正在启动", "success");
+  await waitForBrowserReady();
+  await doOpenLogin("goofish");
   window.setTimeout(refreshStatus, 1800);
+}
+
+async function waitForBrowserReady() {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const status = await api("/api/status");
+    currentStatus = status;
+    if (status.browser_ready) return;
+    if (status.status === "error") throw new Error(status.last_error || "浏览器启动失败");
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  throw new Error("浏览器启动超时，请查看采集日志后重试");
 }
 
 async function doOpenLogin(platform) {
@@ -239,10 +295,8 @@ async function doCheckOne(platform) {
   toast(`${item?.label || platformLabel[platform]}：${item?.logged_in ? "已登录" : "未登录"}`, item?.logged_in ? "success" : "warn");
 }
 
-async function toggleBrowserMode() {
-  const order = ["minimized", "visible", "silent"];
-  const current = currentStatus.browser_mode || settingsCache.browser_mode || "minimized";
-  const next = order[(order.indexOf(current) + 1) % order.length];
+async function applyBrowserMode() {
+  const next = $("browser-mode-select").value;
   const result = await api("/api/browser/mode", "POST", { mode: next });
   settingsCache.browser_mode = next;
   toast(result.msg || "浏览器模式已切换", "success");
@@ -254,7 +308,7 @@ function applySettings(settings) {
   $("cfg-abs_min").value = settings.abs_min ?? 500;
   $("cfg-low_ratio").value = settings.low_ratio ?? 0.55;
   $("cfg-high_ratio").value = settings.high_ratio ?? 3;
-  $("cfg-keep_min").checked = (settings.keep_min ?? "1") === "1";
+  $("browser-mode-select").value = settings.browser_mode || "minimized";
   selectedPlatforms = new Set(["goofish"]);
   const visibleNames = new Set(allModels.map((model) => model.name));
   const savedModels = (settings.selected_models || "").split(",").filter((name) => visibleNames.has(name));
@@ -262,27 +316,24 @@ function applySettings(settings) {
   watchedModels = new Set((settings.watched_models || "").split(",").filter(Boolean));
 }
 
-async function saveThresholds() {
+async function saveThresholds(showToast = true) {
   const body = {
     abs_min: Number($("cfg-abs_min").value),
     low_ratio: Number($("cfg-low_ratio").value),
     high_ratio: Number($("cfg-high_ratio").value),
-    keep_min: $("cfg-keep_min").checked ? "1" : "0",
   };
   const result = await api("/api/settings", "POST", body);
   settingsCache = { ...settingsCache, ...result.settings };
   $("cfg-abs_min").value = settingsCache.abs_min;
   $("cfg-low_ratio").value = settingsCache.low_ratio;
   $("cfg-high_ratio").value = settingsCache.high_ratio;
-  $("cfg-keep_min").checked = settingsCache.keep_min === "1";
-  toast("过滤阈值已保存", "success");
+  if (showToast) toast("过滤阈值已保存", "success");
 }
 
 async function resetThresholds() {
   $("cfg-abs_min").value = 500;
   $("cfg-low_ratio").value = 0.55;
   $("cfg-high_ratio").value = 3;
-  $("cfg-keep_min").checked = true;
   await saveThresholds();
 }
 
@@ -335,6 +386,7 @@ function renderModelCards() {
     checkbox.addEventListener("change", () => {
       if (checkbox.checked) selectedModels.add(model.name); else selectedModels.delete(model.name);
       card.classList.toggle("on", checkbox.checked);
+      renderReadiness(currentStatus.readiness || {});
     });
     const [badgeClass, badgeText] = modelBadge(model);
     card.append(checkbox, node("span", `pc-badge ${badgeClass}`, badgeText), node("span", "pc-name", model.name));
@@ -462,10 +514,21 @@ function applyPriceFilters() {
   const query = $("filter-search").value.trim().toLocaleLowerCase("zh-CN");
   const min = Number.parseFloat($("filter-min").value);
   const max = Number.parseFloat($("filter-max").value);
+  const freshness = $("filter-freshness").value;
   if (series) rows = rows.filter((row) => row.series === series);
   if (query) rows = rows.filter((row) => `${row.model || ""} ${row.title || ""}`.toLocaleLowerCase("zh-CN").includes(query));
   if (Number.isFinite(min)) rows = rows.filter((row) => Number(row.price) >= min);
   if (Number.isFinite(max)) rows = rows.filter((row) => Number(row.price) <= max);
+  if (freshness !== "all") {
+    const days = freshness === "today" ? 1 : Number(freshness);
+    const cutoff = new Date();
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setDate(cutoff.getDate() - Math.max(0, days - 1));
+    rows = rows.filter((row) => {
+      const timestamp = new Date(String(row.ts || "").replace(" ", "T"));
+      return Number.isFinite(timestamp.getTime()) && timestamp >= cutoff;
+    });
+  }
   if ($("filter-watched").checked) rows = rows.filter((row) => watchedModels.has(row.model));
   const sort = $("filter-sort").value;
   if (sort === "price-asc") rows.sort((a, b) => Number(a.price) - Number(b.price));
@@ -480,6 +543,7 @@ function renderPrices() {
   $("statItems").textContent = allData.length;
   const covered = new Set(allData.map((item) => item.model));
   $("statModels").textContent = covered.size;
+  renderReadiness(currentStatus.readiness || {});
   const pageCount = Math.max(1, Math.ceil(rows.length / pricePageSize));
   pricePage = Math.max(1, Math.min(pricePage, pageCount));
   const pageRows = rows.slice((pricePage - 1) * pricePageSize, pricePage * pricePageSize);
@@ -512,13 +576,26 @@ function renderPrices() {
       if (href) {
         const link = node("a", "", "查看"); link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer"; linkCell.append(link);
       }
-      tr.append(linkCell, node("td", "", String(row.ts || "").slice(5, 19)));
+      const update = node("td", "update-time", relativeTime(row.ts));
+      update.title = String(row.ts || "");
+      tr.append(linkCell, update);
       body.append(tr);
     }
     table.append(body); wrap.append(table);
   }
   renderPagination(pageCount);
   updateTrendModels();
+}
+
+function relativeTime(value) {
+  const timestamp = new Date(String(value || "").replace(" ", "T"));
+  if (!Number.isFinite(timestamp.getTime())) return String(value || "–").slice(5, 19);
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp.getTime()) / 1000));
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)} 天前`;
+  return String(value || "").slice(0, 10);
 }
 
 function renderPagination(pageCount) {
@@ -614,6 +691,11 @@ function renderStats(stats) {
   for (const [platform, count] of Object.entries(stats.platform_dist || {})) {
     const chip = node("span", "model-stat"); chip.append(document.createTextNode(`${platform} `), node("b", "", count), document.createTextNode(" 条")); detail.append(chip);
   }
+  if (stats.latest_update) {
+    const fresh = node("span", "model-stat freshness-stat");
+    fresh.append(node("b", "", `近 7 天 ${stats.fresh_7d_count ?? 0} 条`), document.createTextNode(` · 较早数据 ${stats.stale_count ?? 0} 条 · 最近 ${relativeTime(stats.latest_update)}`));
+    detail.append(fresh);
+  }
   for (const [model, values] of Object.entries(stats.per_model || {})) {
     const chip = node("span", "model-stat");
     chip.append(node("b", "", model), document.createTextNode(" "), node("span", "msc", `均价¥${values.mean} · 中位¥${values.median} · 最低¥${values.min} · ${values.count}条`));
@@ -705,6 +787,7 @@ async function refreshDataBundle(force = false) {
   const rows = priceResult.data || [];
   if (Number.isFinite(Number(priceResult.revision))) {
     dataRevision = Number(priceResult.revision);
+    dataSignature = String(dataRevision);
   } else {
     const nextSignature = signatureFor(rows);
     if (!force && nextSignature === dataSignature) return;
@@ -724,8 +807,15 @@ async function refreshDataBundle(force = false) {
 }
 
 async function doStart() {
+  await Promise.all([persistScope(false), saveThresholds(false)]);
   const result = await api("/api/control/start_crawl", "POST");
   toast(result.ok ? "浏览器将自动启动；每个型号只采集一轮" : result.msg, result.ok ? "success" : "error");
+  await refreshStatus();
+}
+
+async function retryFailed() {
+  const result = await api("/api/control/retry_failed", "POST");
+  toast(result.msg || "正在重试失败型号", "success");
   await refreshStatus();
 }
 
@@ -767,14 +857,15 @@ function bindStaticEvents() {
   $("btn-stop").addEventListener("click", () => withBusy("btn-stop", () => doControl("/api/control/stop")).catch(reportActionError));
   $("btn-boot").addEventListener("click", () => withBusy("btn-boot", doBoot).catch(reportActionError));
   $("btn-check").addEventListener("click", () => withBusy("btn-check", doCheckAll).catch(reportActionError));
-  $("btn-mode").addEventListener("click", () => withBusy("btn-mode", toggleBrowserMode).catch(reportActionError));
+  $("btn-mode").addEventListener("click", () => withBusy("btn-mode", applyBrowserMode).catch(reportActionError));
+  $("btn-retry-failed").addEventListener("click", () => withBusy("btn-retry-failed", retryFailed).catch(reportActionError));
   $("btn-save-settings").addEventListener("click", () => withBusy("btn-save-settings", saveThresholds).catch(reportActionError));
   $("btn-reset-settings").addEventListener("click", () => withBusy("btn-reset-settings", resetThresholds).catch(reportActionError));
   $("btn-save-scope").addEventListener("click", () => withBusy("btn-save-scope", () => persistScope(true)).catch(reportActionError));
   $("btn-add-model").addEventListener("click", () => withBusy("btn-add-model", addModel).catch(reportActionError));
   $("new-model").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); withBusy("btn-add-model", addModel).catch(reportActionError); } });
   for (const id of ["filter-search", "filter-min", "filter-max"]) $(id).addEventListener("input", () => { pricePage = 1; renderPrices(); });
-  for (const id of ["filter-series", "filter-sort", "filter-watched"]) $(id).addEventListener("change", () => { pricePage = 1; renderPrices(); });
+  for (const id of ["filter-series", "filter-sort", "filter-freshness", "filter-watched"]) $(id).addEventListener("change", () => { pricePage = 1; renderPrices(); });
   $("btn-trend").addEventListener("click", () => withBusy("btn-trend", loadTrend).catch(reportActionError));
   $("trend-model").addEventListener("change", () => { if ($("trend-model").value) loadTrend().catch(reportActionError); });
   $("trend-platform").addEventListener("change", () => { if ($("trend-model").value) loadTrend().catch(reportActionError); });
@@ -792,7 +883,8 @@ async function fastLoop() {
     finally { fastBusy = false; }
   }
   // 采集器按页面批量提交、逐条记录日志；高频轻量状态轮询及时反映进度。
-  window.setTimeout(fastLoop, 2000);
+  const active = ["running", "paused"].includes(currentStatus.status);
+  window.setTimeout(fastLoop, active ? 2500 : 8000);
 }
 
 async function slowLoop() {
@@ -803,7 +895,8 @@ async function slowLoop() {
     finally { slowBusy = false; }
   }
   // 仅轮询轻量数据版本；版本未变化时服务端不再序列化完整价格列表。
-  window.setTimeout(slowLoop, 2500);
+  const active = ["running", "paused"].includes(currentStatus.status);
+  window.setTimeout(slowLoop, active ? 2800 : 10000);
 }
 
 async function initialize() {
